@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>SyncCheck 構文チェック</title>
+<style>
+  body { font-family: Consolas, monospace; background: #12141a; color: #e8eaf0;
+         padding: 24px; line-height: 1.8; }
+  .ok { color: #4ec98a; }
+  .bad { color: #e6685a; }
+  h1 { font-size: 18px; }
+  pre { background: #0d0f13; padding: 10px; border-radius: 4px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>SyncCheck 構文チェック</h1>
+<p>各モジュールを実際にブラウザに読ませて、構文エラーと export 漏れを見る。</p>
+<div id="out">読み込み中...</div>
+
+<script type="module">
+const out = document.getElementById('out');
+const lines = [];
+
+function say(ok, msg, detail = '') {
+  lines.push(`<div class="${ok ? 'ok' : 'bad'}">${ok ? 'ok  ' : 'FAIL'} ${msg}</div>`
+    + (detail ? `<pre>${detail}</pre>` : ''));
+  out.innerHTML = lines.join('');
+}
+
+// 各モジュールが読めるか、必要な関数が出ているか
+const want = {
+  '../src/sync.js': ['buildEnvelope', 'crossCorrelate', 'verifySync',
+                     'findOffsetFullRange', 'downsampleEnvelope'],
+  '../src/timeline.js': ['resolveRecordingTimes', 'placeOnTimeline', 'buildTimeline',
+                         'findOverlappingPairs', 'findOrphans', 'MIN_OVERLAP_SEC'],
+  '../src/audio.js': ['loadFFmpeg', 'extractSyncPCM', 'readMeta',
+                      'readDurationQuick', 'SYNC_RATE', 'ENV_RATE', 'isLoaded'],
+  '../src/measure.js': ['measurePair', 'measureAll', 'searchBlind', 'summarize',
+                        'MEASURE_LEN_SEC', 'MIN_MEASURE_SEC'],
+  '../src/export.js': ['buildReportText', 'buildCSV', 'buildJSON', 'buildFCPXML',
+                       'saveText', 'fmtClock', 'fmtOffset', 'toTime',
+                       'timebaseFor', 'nearestFps', 'xmlEscape'],
+};
+
+const mods = {};
+let fail = 0;
+
+for (const [path, names] of Object.entries(want)) {
+  try {
+    const m = await import(path);
+    mods[path] = m;
+    say(true, `${path} を読めた`);
+    for (const n of names) {
+      if (typeof m[n] === 'undefined') {
+        say(false, `  ${path} に ${n} が無い`);
+        fail++;
+      }
+    }
+  } catch (err) {
+    say(false, `${path} が読めない`, err.stack || err.message);
+    fail++;
+  }
+}
+
+// 実際に計算させてみる（ブラウザ上で動くことの確認）
+try {
+  const { buildEnvelope, crossCorrelate, verifySync } = mods['../src/sync.js'];
+
+  // 一定音の RMS が振幅と一致するか
+  const pcm = new Float32Array(8000 * 2).fill(0.5);
+  const env = buildEnvelope(pcm, 8000, 100);
+  const rmsOk = env.length === 200 && Math.abs(env[50] - 0.5) < 0.001;
+  say(rmsOk, `buildEnvelope: 長さ ${env.length} / RMS ${env[50].toFixed(4)}`);
+  if (!rmsOk) fail++;
+
+  // 符号の検算。b を +3.13秒 遅らせたら +3.13 が返るはず
+  let s = 7;
+  const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
+  const n = 180 * 100;
+  const a = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const t = i / 100;
+    let v = 0.25 + 0.08 * Math.sin(t * 1.7) + 0.05 * rnd();
+    if (Math.floor(t) % 37 === 0 && t % 1 < 0.4) v += 0.6;
+    if (Math.floor(t) % 53 === 0 && t % 1 < 0.3) v += 0.45;
+    a[i] = v;
+  }
+  const shift = Math.round(3.13 * 100);
+  const b = new Float32Array(n);
+  for (let i = 0; i < n; i++) b[i] = (i - shift >= 0) ? a[i - shift] : 0.02;
+
+  const r = crossCorrelate(a, b, 100, 15);
+  const signOk = Math.abs(r.offsetSec - 3.13) < 0.02;
+  say(signOk, `crossCorrelate の符号: ${r.offsetSec.toFixed(3)}（期待 +3.13）`);
+  if (!signOk) fail++;
+
+  const v = verifySync(a, b, 100, 3, 15);
+  const vOk = Math.abs(v.offsetSec - 3.13) < 0.05;
+  say(vOk, `verifySync: ${v.offsetSec.toFixed(3)} / drift=${v.drift} / 窓 ${v.points.length}`);
+  if (!vOk) fail++;
+} catch (err) {
+  say(false, 'sync.js の計算でエラー', err.stack || err.message);
+  fail++;
+}
+
+// 組の見つけ方
+try {
+  const { buildTimeline, findOverlappingPairs } = mods['../src/timeline.js'];
+  const t0 = 1700000000000;
+  const mk = (name, startMs, dur) =>
+    ({ name, duration: dur, creationMs: startMs, lastModified: startMs + dur * 1000 });
+
+  const A = [mk('A1.mp4', t0, 600), mk('A2.mp4', t0 + 610000, 600),
+             mk('A3.mp4', t0 + 1230000, 600)];
+  const B = [mk('B1.mp4', t0 + 2000, 600), mk('B2.mp4', t0 + 615000, 600),
+             mk('B3.mp4', t0 + 1233000, 600)];
+
+  const pairs = findOverlappingPairs(buildTimeline(A, B));
+  const names = pairs.map((p) => `${p.a.name}-${p.b.name}`).sort().join(',');
+  const pOk = pairs.length === 3
+    && names === 'A1.mp4-B1.mp4,A2.mp4-B2.mp4,A3.mp4-B3.mp4';
+  say(pOk, `3本×3本 → ${pairs.length}組: ${names}`);
+  if (!pOk) fail++;
+} catch (err) {
+  say(false, 'timeline.js でエラー', err.stack || err.message);
+  fail++;
+}
+
+// fcpxml が整形式か（ブラウザの XML パーサで確認）
+try {
+  const { buildFCPXML } = mods['../src/export.js'];
+  const mkf = (name, startSec, dur) =>
+    ({ name, duration: dur, startSec, endSec: startSec + dur });
+  const results = [
+    { ok: true, totalOffsetSec: 2.0,
+      pair: { a: mkf('A1.mp4', 0, 600), b: mkf('B1.mp4', 2, 600), overlapSec: 598 } },
+    { ok: true, totalOffsetSec: -5.0,
+      pair: { a: mkf('A2.mp4', 610, 600), b: mkf('B2.mp4', 605, 600), overlapSec: 595 } },
+  ];
+  const xml = buildFCPXML(results, { fps: 30 });
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  const err = doc.querySelector('parsererror');
+  if (err) {
+    say(false, 'fcpxml が整形式でない', err.textContent);
+    fail++;
+  } else {
+    const clips = doc.querySelectorAll('spine > asset-clip');
+    const lanes = doc.querySelectorAll('asset-clip[lane="1"]');
+    const offs = [...doc.querySelectorAll('asset-clip')]
+      .map((c) => parseInt(c.getAttribute('offset'), 10));
+    const allPos = offs.every((o) => o >= 0);
+    const ok = clips.length === 2 && lanes.length === 2 && allPos;
+    say(ok, `fcpxml: 下トラック ${clips.length} / lane1 ${lanes.length}`
+            + ` / offset 全部0以上 ${allPos}`);
+    if (!ok) fail++;
+  }
+
+  // テキスト / CSV / JSON も落ちずに作れるか
+  const { buildReportText, buildCSV, buildJSON } = mods['../src/export.js'];
+  const { summarize } = mods['../src/measure.js'];
+  const withPoints = results.map((r) => ({
+    ...r, label: `${r.pair.a.name} ↔ ${r.pair.b.name}`,
+    timeGapSec: 2, measuredSec: 0, score: 0.8, drift: false,
+    maxDeviationSec: 0.1, lowConfidence: false, singleWindow: false,
+    points: [{ atSec: 0, offsetSec: 2, score: 0.8 }], measuredLenSec: 180,
+  }));
+  const sum = summarize(withPoints);
+  const txt = buildReportText(withPoints, sum, {});
+  const csv = buildCSV(withPoints);
+  const json = buildJSON(withPoints, sum);
+  JSON.parse(json);
+  say(txt.length > 100 && csv.includes(',') && json.includes('SyncCheck'),
+      `テキスト ${txt.length}字 / CSV ${csv.split('\n').length}行 / JSON 読み戻せた`);
+} catch (err) {
+  say(false, 'export.js でエラー', err.stack || err.message);
+  fail++;
+}
+
+say(fail === 0, fail === 0
+  ? '━━━ すべて通った ━━━'
+  : `━━━ ${fail}件 失敗 ━━━`);
+</script>
+</body>
+</html>

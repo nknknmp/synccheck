@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>SyncCheck 結果画面の確認</title>
+<script>
+  // 本体の見た目をそのまま使う。
+  // CSS をコピーして持つと、片方だけ直して食い違う事故が起きるため、
+  // index.html から <style> を抜き出して差し込む。
+  fetch('../index.html')
+    .then((r) => r.text())
+    .then((html) => {
+      const m = html.match(/<style>([\s\S]*?)<\/style>/);
+      if (m) {
+        const s = document.createElement('style');
+        s.textContent = m[1];
+        document.head.appendChild(s);
+      }
+    });
+</script>
+</head>
+<body>
+<p id="status" style="font-family:monospace;padding:12px;background:#1b1e26;color:#9aa1b0">
+  測定中... しばらくお待ちください
+</p>
+<div class="wrap">
+  <h1>SyncCheck<span class="sub">結果画面の確認（テスト素材で自動測定）</span></h1>
+  <div id="results"></div>
+</div>
+
+<script type="module">
+import { loadFFmpeg, readMeta, setLogging } from '../src/audio.js';
+import { buildTimeline, findOverlappingPairs, findOrphans } from '../src/timeline.js';
+import { measureAll, summarize } from '../src/measure.js';
+import { fmtOffset, fmtClock } from '../src/export.js';
+
+const $ = (id) => document.getElementById(id);
+setLogging(false);
+
+// index.html の showResults と同じ描画をする。
+// 画面の見た目を確かめるのが目的なので、描画部分だけ写してある。
+function showResults(results, summary, orphans) {
+  const box = $('results');
+  box.innerHTML = '';
+
+  const h = document.createElement('h2');
+  h.textContent = `結果（${summary.ok} / ${summary.total} 組）`;
+  box.appendChild(h);
+
+  if (summary.warnings.length > 0 || orphans.length > 0) {
+    const w = document.createElement('div');
+    w.className = 'warnbox';
+    const items = [...summary.warnings];
+    if (orphans.length > 0) {
+      items.push(`組にならなかった素材: ${orphans.map((f) => f.name).join(', ')}`);
+    }
+    w.innerHTML = '<strong>注意</strong><ul>'
+      + items.map((x) => `<li>${x}</li>`).join('') + '</ul>';
+    box.appendChild(w);
+  }
+
+  for (const r of results) {
+    const d = document.createElement('div');
+    d.className = 'pair' + (r.ok ? '' : ' bad');
+
+    if (!r.ok) {
+      d.innerHTML = `<div class="head"><span class="names">${r.label}</span>`
+        + `<span class="big">—</span></div>`
+        + `<div class="expl">測れませんでした: ${r.reason}</div>`;
+      box.appendChild(d);
+      continue;
+    }
+
+    const flags = [];
+    if (r.lowConfidence) {
+      flags.push('<span class="flag bad">窓の過半数が一致しなかった・値を信用しないこと</span>');
+    } else if (r.drift) {
+      flags.push('<span class="flag warn">区間ごとにズレが変わっている</span>');
+    } else {
+      flags.push('<span class="flag ok">ずれは一定</span>');
+    }
+    if (r.singleWindow) flags.push('<span class="flag warn">短いので1回しか測っていない</span>');
+    if (r.note) flags.push(`<span class="flag warn">${r.note}</span>`);
+
+    const winRows = r.points.map((p) => {
+      const out = Math.abs(p.offsetSec - r.measuredSec) > 0.5;
+      return `<tr class="${out ? 'out' : ''}"><td>${fmtClock(p.atSec)}</td>`
+        + `<td class="off">${fmtOffset(p.offsetSec)}</td>`
+        + `<td>${p.score.toFixed(3)}</td></tr>`;
+    }).join('');
+
+    d.innerHTML =
+      `<div class="head"><span class="names">${r.label}</span>`
+      + `<span class="big">${fmtOffset(r.totalOffsetSec)}</span></div>`
+      + `<div class="expl">B側を ${Math.abs(r.totalOffsetSec).toFixed(2)}秒 `
+      + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}にずらすと合います</div>`
+      + flags.join('')
+      + `<dl class="kv">`
+      + `<dt>撮影時刻の差</dt><dd>${fmtOffset(r.timeGapSec)}</dd>`
+      + `<dt>音で測った差</dt><dd>${fmtOffset(r.measuredSec)}</dd>`
+      + `<dt>重なり</dt><dd>${r.pair.overlapSec.toFixed(1)}秒`
+      + `（うち ${r.measuredLenSec.toFixed(0)}秒 で測定）</dd>`
+      + `<dt>相関スコア</dt><dd>${r.score.toFixed(3)}</dd>`
+      + (r.singleWindow ? '' :
+         `<dt>窓のばらつき</dt><dd>最大 ${r.maxDeviationSec.toFixed(2)}秒</dd>`)
+      + `</dl>`
+      + (winRows ? `<table class="win"><tr><th>測った位置</th><th>ズレ</th>`
+          + `<th>スコア</th></tr>${winRows}</table>` : '');
+
+    box.appendChild(d);
+  }
+}
+
+try {
+  await loadFFmpeg();
+
+  const getFile = async (name) => {
+    const res = await fetch(`./fixtures/${name}`);
+    const buf = await res.arrayBuffer();
+    return new File([buf], name, { type: 'video/mp4' });
+  };
+
+  // 3組に見えるよう、同じ素材を別名で3回使う。
+  // 撮影時刻をずらして「途中で切れて再開した」形を作る。
+  const fa = await getFile('A_noise.mp4');
+  const fb = await getFile('B_noise.mp4');
+  const ma = await readMeta(fa);
+  const mb = await readMeta(fb);
+
+  const t0 = Date.now() - 3_600_000;
+  const mk = (name, file, dur, startMs) => ({
+    name, file, duration: dur, creationMs: startMs,
+    lastModified: startMs + dur * 1000,
+  });
+
+  // A側3本 / B側3本。B は撮影開始が少しずつ違う（現場でよくある形）
+  const A = [
+    mk('実技1_A.mp4', fa, ma.duration, t0),
+    mk('実技2_A.mp4', fa, ma.duration, t0 + 100_000),
+    mk('質疑_A.mp4',  fa, ma.duration, t0 + 200_000),
+  ];
+  const B = [
+    mk('実技1_B.mp4', fb, mb.duration, t0 - 1_000),
+    mk('実技2_B.mp4', fb, mb.duration, t0 + 100_000 + 2_000),
+    mk('質疑_B.mp4',  fb, mb.duration, t0 + 200_000 - 500),
+  ];
+
+  const tl = buildTimeline(A, B);
+  const pairs = findOverlappingPairs(tl);
+  const orphans = findOrphans(tl, pairs);
+
+  $('status').textContent = `${pairs.length}組を測っています...`;
+
+  const results = await measureAll(pairs, (p) => {
+    $('status').textContent = p.message;
+  }, 60);
+
+  const summary = summarize(results);
+  showResults(results, summary, orphans);
+  $('status').textContent =
+    `測り終わりました（${summary.ok}/${summary.total}組）`;
+  document.title = 'DEMO_DONE';
+
+  await fetch('/__test_result', {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' },
+    body: 'DEMO_DONE\n' + results.map((r) => r.ok
+      ? `${r.label}: 合わせるズレ ${r.totalOffsetSec.toFixed(3)}秒 `
+        + `/ 撮影時刻差 ${r.timeGapSec.toFixed(3)} / 音 ${r.measuredSec.toFixed(3)}`
+        + ` / drift=${r.drift} / lowConf=${r.lowConfidence}`
+        + ` / 窓${r.points.length}`
+      : `${r.label}: NG ${r.reason}`).join('\n')
+      + '\n\n注意:\n' + summary.warnings.map((w) => '  ・' + w).join('\n'),
+  });
+} catch (err) {
+  $('status').textContent = 'エラー: ' + err.message;
+  document.title = 'DEMO_FAIL';
+  await fetch('/__test_result', {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' },
+    body: 'DEMO_FAIL\n' + (err.stack || err.message),
+  });
+}
+</script>
+</body>
+</html>

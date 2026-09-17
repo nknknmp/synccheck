@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SyncCheck - 2カメのズレを測る</title>
+<style>
+  :root {
+    --bg: #12141a;
+    --panel: #1b1e26;
+    --panel2: #22262f;
+    --line: #333844;
+    --fg: #e8eaf0;
+    --dim: #9aa1b0;
+    --accent: #5aa9e6;
+    --ok: #4ec98a;
+    --warn: #e6b45a;
+    --bad: #e6685a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Segoe UI", "Yu Gothic UI", "Hiragino Kaku Gothic ProN", sans-serif;
+    font-size: 15px;
+    line-height: 1.7;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 24px 20px 80px; }
+
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h1 .sub { font-size: 14px; color: var(--dim); font-weight: normal; margin-left: 10px; }
+  h2 { font-size: 17px; margin: 32px 0 12px; padding-bottom: 6px;
+       border-bottom: 1px solid var(--line); }
+
+  .note {
+    background: var(--panel);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14px;
+    color: var(--dim);
+    border-radius: 0 4px 4px 0;
+  }
+  .note strong { color: var(--fg); }
+
+  .drop {
+    border: 2px dashed var(--line);
+    border-radius: 8px;
+    padding: 28px 20px;
+    text-align: center;
+    background: var(--panel);
+    transition: border-color .15s, background .15s;
+    cursor: pointer;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--panel2); }
+  .drop .big { font-size: 16px; margin-bottom: 4px; }
+  .drop .hint { font-size: 13px; color: var(--dim); }
+
+  .groups { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+  @media (max-width: 720px) { .groups { grid-template-columns: 1fr; } }
+
+  .group h3 { font-size: 15px; margin: 0 0 8px; }
+  .group h3 .tag {
+    font-size: 12px; color: var(--dim); font-weight: normal; margin-left: 6px;
+  }
+
+  .filelist { list-style: none; padding: 0; margin: 10px 0 0; }
+  .filelist li {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .filelist .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .filelist .meta { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .filelist .del {
+    background: none; border: none; color: var(--dim); cursor: pointer;
+    font-size: 16px; padding: 0 4px; line-height: 1;
+  }
+  .filelist .del:hover { color: var(--bad); }
+  .filelist .noaudio { color: var(--bad); }
+
+  button.primary {
+    background: var(--accent); color: #07131d; border: none;
+    padding: 11px 24px; border-radius: 5px; font-size: 15px;
+    font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { background: var(--line); color: var(--dim); cursor: not-allowed; }
+  button.ghost {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    padding: 8px 16px; border-radius: 5px; font-size: 14px; cursor: pointer;
+  }
+  button.ghost:hover:not(:disabled) { border-color: var(--accent); }
+  button.ghost:disabled { color: var(--dim); cursor: not-allowed; }
+
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+
+  #log {
+    background: #0d0f13; border: 1px solid var(--line); border-radius: 5px;
+    padding: 10px 12px; font-family: Consolas, "Courier New", monospace;
+    font-size: 12px; color: var(--dim); max-height: 160px; overflow-y: auto;
+    white-space: pre-wrap; margin-top: 12px; display: none;
+  }
+  #log.on { display: block; }
+
+  .pair {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 6px; padding: 16px; margin-bottom: 14px;
+  }
+  .pair .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .pair .names { font-weight: 600; font-size: 15px; }
+  .pair .big {
+    font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums;
+    color: var(--accent); margin-left: auto;
+  }
+  .pair.bad .big { color: var(--bad); }
+  .pair .expl { font-size: 13px; color: var(--dim); margin-top: 2px; }
+
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 14px;
+        font-size: 13px; margin-top: 12px; }
+  .kv dt { color: var(--dim); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  .flag {
+    display: inline-block; font-size: 12px; padding: 2px 8px;
+    border-radius: 3px; margin-top: 10px; margin-right: 6px;
+  }
+  .flag.warn { background: #3a2f18; color: var(--warn); border: 1px solid #5a4620; }
+  .flag.bad  { background: #3a1e1a; color: var(--bad);  border: 1px solid #5a2a24; }
+  .flag.ok   { background: #16301f; color: var(--ok);   border: 1px solid #23492f; }
+
+  table.win { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  table.win th, table.win td {
+    text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  table.win th { color: var(--dim); font-weight: normal; }
+  table.win td.off { font-weight: 600; }
+  table.win tr.out td { color: var(--bad); }
+
+  .bar { height: 5px; background: var(--panel2); border-radius: 3px;
+         overflow: hidden; margin-top: 12px; }
+  .bar i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+
+  .warnbox {
+    background: #2a2015; border: 1px solid #5a4620; border-radius: 5px;
+    padding: 12px 16px; margin: 16px 0; font-size: 14px;
+  }
+  .warnbox ul { margin: 6px 0 0; padding-left: 20px; }
+  .warnbox li { color: var(--warn); }
+
+  .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
+  select, input[type=number] {
+    background: var(--panel2); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 6px 8px; font-size: 14px;
+  }
+  label.inline { font-size: 13px; color: var(--dim); display: flex;
+                 align-items: center; gap: 6px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>SyncCheck<span class="sub">2カメのズレを測る</span></h1>
+
+  <div class="note">
+    <strong>動画はこの端末から出ません。</strong>
+    ブラウザの中で音声だけを読んで計算します。アップロードは発生しません。<br>
+    途中で録画を止めて再開した素材（A側3本・B側3本など）に対応しています。
+    <strong>組ごとに別々に測ります</strong>（再開するたびにズレ方が変わるため）。
+  </div>
+
+  <h2>1. 素材を選ぶ</h2>
+
+  <div class="groups">
+    <div class="group">
+      <h3>A側<span class="tag">基準になるカメラ</span></h3>
+      <div class="drop" id="dropA">
+        <div class="big">ここにドロップ</div>
+        <div class="hint">クリックしても選べます（複数可）</div>
+        <input type="file" id="fileA" multiple accept="video/*,audio/*" class="hidden">
+      </div>
+      <ul class="filelist" id="listA"></ul>
+    </div>
+
+    <div class="group">
+      <h3>B側<span class="tag">合わせたいカメラ</span></h3>
+      <div class="drop" id="dropB">
+        <div class="big">ここにドロップ</div>
+        <div class="hint">クリックしても選べます（複数可）</div>
+        <input type="file" id="fileB" multiple accept="video/*,audio/*" class="hidden">
+      </div>
+      <ul class="filelist" id="listB"></ul>
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="run" disabled>ズレを測る</button>
+    <button class="ghost" id="clear">全部消す</button>
+    <label class="inline">
+      測る長さ
+      <select id="mlen">
+        <option value="60">60秒（速い）</option>
+        <option value="180" selected>180秒（おすすめ）</option>
+        <option value="300">300秒（念入り）</option>
+      </select>
+    </label>
+    <label class="inline">
+      <input type="checkbox" id="showlog"> 経過を表示
+    </label>
+    <label class="inline" title="不具合を追うときだけ。何百行も出ます">
+      <input type="checkbox" id="ffmpeglog"> ffmpeg の詳細も出す
+    </label>
+  </div>
+
+  <div class="bar" id="bar" style="display:none"><i></i></div>
+  <div id="log"></div>
+
+  <div id="results"></div>
+
+  <div id="exportRow" class="row hidden">
+    <button class="ghost" id="expTxt">結果をテキストで保存</button>
+    <button class="ghost" id="expCsv">CSV で保存</button>
+    <button class="ghost" id="expJson">JSON で保存</button>
+    <button class="ghost" id="expFcp">fcpxml で保存</button>
+    <label class="inline">
+      fcpxml のフレームレート
+      <select id="fps">
+        <option value="30" selected>30</option>
+        <option value="29.97">29.97</option>
+        <option value="25">25</option>
+        <option value="24">24</option>
+        <option value="60">60</option>
+      </select>
+    </label>
+  </div>
+
+</div>
+
+<script type="module">
+import { buildTimeline, findOverlappingPairs, findOrphans } from './src/timeline.js';
+import { measureAll, summarize } from './src/measure.js';
+import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
+import { buildReportText, buildCSV, buildJSON, buildFCPXML, saveText,
+         fmtOffset, fmtClock } from './src/export.js';
+
+const groups = { A: [], B: [] };
+let lastResults = null;
+let lastSummary = null;
+
+const $ = (id) => document.getElementById(id);
+
+function log(msg) {
+  const el = $('log');
+  el.textContent += msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+$('showlog').onchange = (e) => $('log').classList.toggle('on', e.target.checked);
+// ffmpeg の生ログは既定で出さない（何百行も出て読めなくなる）。
+// 「ffmpeg の詳細も出す」を入れたときだけ流す。
+$('ffmpeglog').onchange = (e) => {
+  setLogging(e.target.checked);
+  if (e.target.checked) {
+    $('showlog').checked = true;
+    $('log').classList.add('on');
+  }
+};
+
+// --- ファイルの受け取り ---------------------------------------------------
+
+for (const g of ['A', 'B']) {
+  const drop = $('drop' + g);
+  const input = $('file' + g);
+
+  drop.onclick = () => input.click();
+  input.onchange = () => { addFiles(g, [...input.files]); input.value = ''; };
+
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    addFiles(g, [...e.dataTransfer.files]);
+  };
+}
+
+async function addFiles(g, files) {
+  for (const file of files) {
+    if (groups[g].some((f) => f.name === file.name)) continue;
+
+    // まず速い方法で長さだけ読んで、すぐ一覧に出す
+    const duration = await readDurationQuick(file);
+    groups[g].push({
+      name: file.name, file, duration,
+      lastModified: file.lastModified,
+      creationMs: null, hasAudio: null, probed: false,
+    });
+    render();
+  }
+}
+
+function render() {
+  for (const g of ['A', 'B']) {
+    const ul = $('list' + g);
+    ul.innerHTML = '';
+    if (groups[g].length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'まだありません';
+      ul.appendChild(li);
+      continue;
+    }
+    for (const f of groups[g]) {
+      const li = document.createElement('li');
+      const audioWarn = f.hasAudio === false
+        ? '<span class="noaudio">音声なし</span>' : '';
+      li.innerHTML =
+        `<span class="nm" title="${f.name}">${f.name}</span>`
+        + `<span class="meta">${f.duration ? fmtClock(f.duration) : '長さ不明'}`
+        + `${f.creationMs ? ' / 撮影時刻あり' : ''} ${audioWarn}</span>`;
+      const del = document.createElement('button');
+      del.className = 'del';
+      del.textContent = '×';
+      del.title = 'この素材を外す';
+      del.onclick = () => {
+        groups[g] = groups[g].filter((x) => x.name !== f.name);
+        render();
+      };
+      li.appendChild(del);
+      ul.appendChild(li);
+    }
+  }
+  $('run').disabled = !(groups.A.length > 0 && groups.B.length > 0);
+}
+
+$('clear').onclick = () => {
+  groups.A = []; groups.B = [];
+  lastResults = null;
+  $('results').innerHTML = '';
+  $('exportRow').classList.add('hidden');
+  $('log').textContent = '';
+  render();
+};
+
+// --- 測る -----------------------------------------------------------------
+
+$('run').onclick = async () => {
+  const btn = $('run');
+  btn.disabled = true;
+  $('results').innerHTML = '';
+  $('exportRow').classList.add('hidden');
+  $('bar').style.display = 'block';
+  setBar(0);
+
+  try {
+    log('FFmpeg を準備しています（初回は数十MBの読み込みがあります）');
+    await loadFFmpeg((p) => { if (p.type === 'log') log('  ' + p.message); });
+
+    // 撮影時刻を読む。ここで初めて ffmpeg を通す。
+    log('撮影時刻を読んでいます');
+    const all = [...groups.A, ...groups.B];
+    let n = 0;
+    for (const f of all) {
+      if (!f.probed) {
+        try {
+          const m = await readMeta(f.file);
+          f.creationMs = m.creationMs;
+          f.hasAudio = m.hasAudio;
+          if (m.duration > 0) f.duration = m.duration;
+        } catch (err) {
+          log(`  ${f.name}: 読めませんでした（${err.message}）`);
+        }
+        f.probed = true;
+      }
+      setBar((++n / all.length) * 0.25);
+      log(`  ${f.name}: ${f.duration ? fmtClock(f.duration) : '長さ不明'}`
+          + `${f.creationMs ? ' / 撮影時刻 ' + new Date(f.creationMs).toLocaleString('ja-JP') : ' / 撮影時刻なし'}`
+          + `${f.hasAudio === false ? ' / 音声なし' : ''}`);
+    }
+    render();
+
+    const noAudio = all.filter((f) => f.hasAudio === false);
+    if (noAudio.length > 0) {
+      showError('音声が入っていない素材があります: '
+        + noAudio.map((f) => f.name).join(', ')
+        + '。音で測るので、これらは外してください。');
+      return;
+    }
+
+    // 時間軸に載せて、重なる組を探す
+    const tl = buildTimeline(groups.A, groups.B);
+    const pairs = findOverlappingPairs(tl);
+    const orphans = findOrphans(tl, pairs);
+
+    log(`重なる組: ${pairs.length}組`);
+    for (const p of pairs) {
+      log(`  ${p.a.name} ↔ ${p.b.name}  重なり ${p.overlapSec.toFixed(1)}秒`);
+    }
+    if (orphans.length > 0) {
+      log(`組にならなかった素材: ${orphans.map((f) => f.name).join(', ')}`);
+    }
+
+    if (pairs.length === 0) {
+      showError(
+        '重なる組が見つかりませんでした。'
+        + '撮影時刻が失われている（クラウド経由でコピーした等）可能性があります。'
+        + 'この場合、時間軸に載せられないので組を特定できません。'
+      );
+      return;
+    }
+
+    // 組ごとに測る
+    const mlen = Number($('mlen').value);
+    const results = await measureAll(pairs, (p) => {
+      setBar(0.25 + (p.done / p.total) * 0.75);
+      log(p.message);
+    }, mlen);
+
+    lastResults = results;
+    lastSummary = summarize(results);
+    showResults(results, lastSummary, orphans);
+    $('exportRow').classList.remove('hidden');
+    setBar(1);
+  } catch (err) {
+    showError('測定中にエラーが起きました: ' + err.message);
+    log('ERROR ' + (err.stack || err.message));
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+function setBar(p) {
+  $('bar').querySelector('i').style.width = `${Math.round(p * 100)}%`;
+}
+
+function showError(msg) {
+  $('results').innerHTML =
+    `<div class="warnbox"><strong>測れませんでした</strong><br>${msg}</div>`;
+}
+
+function showResults(results, summary, orphans) {
+  const box = $('results');
+  box.innerHTML = '';
+
+  const h = document.createElement('h2');
+  h.textContent = `2. 結果（${summary.ok} / ${summary.total} 組）`;
+  box.appendChild(h);
+
+  if (summary.warnings.length > 0 || orphans.length > 0) {
+    const w = document.createElement('div');
+    w.className = 'warnbox';
+    const items = [...summary.warnings];
+    if (orphans.length > 0) {
+      items.push(`組にならなかった素材: ${orphans.map((f) => f.name).join(', ')}`);
+    }
+    w.innerHTML = '<strong>注意</strong><ul>'
+      + items.map((x) => `<li>${x}</li>`).join('') + '</ul>';
+    box.appendChild(w);
+  }
+
+  for (const r of results) {
+    const d = document.createElement('div');
+    d.className = 'pair' + (r.ok ? '' : ' bad');
+
+    if (!r.ok) {
+      d.innerHTML =
+        `<div class="head"><span class="names">${r.label}</span>`
+        + `<span class="big">—</span></div>`
+        + `<div class="expl">測れませんでした: ${r.reason}</div>`;
+      box.appendChild(d);
+      continue;
+    }
+
+    const flags = [];
+    if (r.lowConfidence) {
+      flags.push('<span class="flag bad">窓の過半数が一致しなかった・値を信用しないこと</span>');
+    } else if (r.drift) {
+      flags.push('<span class="flag warn">区間ごとにズレが変わっている</span>');
+    } else {
+      flags.push('<span class="flag ok">ずれは一定</span>');
+    }
+    if (r.singleWindow) {
+      flags.push('<span class="flag warn">短いので1回しか測っていない</span>');
+    }
+    if (r.note) {
+      flags.push(`<span class="flag warn">${r.note}</span>`);
+    }
+
+    const winRows = r.points.map((p) => {
+      const out = Math.abs(p.offsetSec - r.measuredSec) > 0.5;
+      return `<tr class="${out ? 'out' : ''}">`
+        + `<td>${fmtClock(p.atSec)}</td>`
+        + `<td class="off">${fmtOffset(p.offsetSec)}</td>`
+        + `<td>${p.score.toFixed(3)}</td></tr>`;
+    }).join('');
+
+    d.innerHTML =
+      `<div class="head">`
+      + `<span class="names">${r.label}</span>`
+      + `<span class="big">${fmtOffset(r.totalOffsetSec)}</span>`
+      + `</div>`
+      + `<div class="expl">B側を ${Math.abs(r.totalOffsetSec).toFixed(2)}秒 `
+      + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}にずらすと合います</div>`
+      + flags.join('')
+      + `<dl class="kv">`
+      + `<dt>撮影時刻の差</dt><dd>${fmtOffset(r.timeGapSec)}</dd>`
+      + `<dt>音で測った差</dt><dd>${fmtOffset(r.measuredSec)}</dd>`
+      + `<dt>重なり</dt><dd>${r.pair.overlapSec.toFixed(1)}秒`
+      + `（うち ${r.measuredLenSec.toFixed(0)}秒 で測定）</dd>`
+      + `<dt>相関スコア</dt><dd>${r.score.toFixed(3)}</dd>`
+      + (r.singleWindow ? '' :
+         `<dt>窓のばらつき</dt><dd>最大 ${r.maxDeviationSec.toFixed(2)}秒</dd>`)
+      + `</dl>`
+      + (winRows
+        ? `<table class="win"><tr><th>測った位置</th><th>ズレ</th><th>スコア</th></tr>`
+          + winRows + `</table>`
+        : '');
+
+    box.appendChild(d);
+  }
+}
+
+// --- 書き出し -------------------------------------------------------------
+
+function stamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+       + `_${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+$('expTxt').onclick = () => {
+  if (!lastResults) return;
+  saveText(`SyncCheck_${stamp()}.txt`,
+    buildReportText(lastResults, lastSummary, {
+      groupAName: groups.A.map((f) => f.name).join(', '),
+      groupBName: groups.B.map((f) => f.name).join(', '),
+    }), 'text/plain');
+};
+
+$('expCsv').onclick = () => {
+  if (!lastResults) return;
+  saveText(`SyncCheck_${stamp()}.csv`, buildCSV(lastResults), 'text/csv');
+};
+
+$('expJson').onclick = () => {
+  if (!lastResults) return;
+  saveText(`SyncCheck_${stamp()}.json`,
+    buildJSON(lastResults, lastSummary), 'application/json');
+};
+
+$('expFcp').onclick = () => {
+  if (!lastResults) return;
+  try {
+    const xml = buildFCPXML(lastResults, { fps: Number($('fps').value) });
+    saveText(`SyncCheck_${stamp()}.fcpxml`, xml, 'application/xml');
+  } catch (err) {
+    alert('書き出せませんでした: ' + err.message);
+  }
+};
+
+render();
+</script>
+</body>
+</html>

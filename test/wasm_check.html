@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>SyncCheck ffmpeg.wasm 実測チェック</title>
+<style>
+  body { font-family: Consolas, monospace; background: #12141a; color: #e8eaf0;
+         padding: 24px; line-height: 1.8; }
+  .ok { color: #4ec98a; } .bad { color: #e6685a; } .dim { color: #9aa1b0; }
+  h1 { font-size: 18px; }
+  pre { background: #0d0f13; padding: 10px; border-radius: 4px; overflow-x: auto;
+        font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>ffmpeg.wasm 実測チェック</h1>
+<p class="dim">
+  test/fixtures/ に置いた A_test.mp4 / B_test.mp4 を、
+  ブラウザの ffmpeg.wasm で読んで測る。<br>
+  正解は <strong>+3.130秒</strong>（ネイティブ ffmpeg で5通り測って一致した値）。
+</p>
+<div id="out">読み込み中...</div>
+
+<script type="module">
+import { loadFFmpeg, extractSyncPCM, readMeta, SYNC_RATE, ENV_RATE } from '../src/audio.js';
+import { buildEnvelope, crossCorrelate, verifySync } from '../src/sync.js';
+import { buildTimeline, findOverlappingPairs } from '../src/timeline.js';
+import { measurePair } from '../src/measure.js';
+
+const out = document.getElementById('out');
+const lines = [];
+const plain = [];   // ヘッドレスで回したときサーバーへ送る用
+let fail = 0;
+
+function say(cls, msg, detail = '') {
+  lines.push(`<div class="${cls}">${msg}</div>`
+    + (detail ? `<pre>${detail}</pre>` : ''));
+  plain.push(msg + (detail ? '\n    ' + detail.split('\n').slice(0, 6).join('\n    ') : ''));
+  out.innerHTML = lines.join('');
+}
+const ok = (c, m, d) => { if (!c) fail++; say(c ? 'ok' : 'bad', (c ? 'ok   ' : 'FAIL ') + m, d); };
+const info = (m) => say('dim', '     ' + m);
+
+const TRUE_OFFSET = 3.13;
+
+try {
+  info('ffmpeg.wasm を読み込んでいます...');
+  // ffmpeg の生ログは出さない（何百行も出て結果が埋まる）
+  await loadFFmpeg((p) => { if (p.type === 'log' && p.message) info('  ' + p.message); });
+  ok(true, 'ffmpeg.wasm を読み込めた');
+
+  // fixtures を fetch して File に変える（ブラウザがローカルから読む形を再現）
+  const getFile = async (name) => {
+    const res = await fetch(`./fixtures/${name}`);
+    if (!res.ok) throw new Error(`${name} が無い (HTTP ${res.status})`);
+    const buf = await res.arrayBuffer();
+    const f = new File([buf], name, { type: 'video/mp4' });
+    // ブラウザの File は lastModified を持つ。テストでは撮影時刻を模して入れる。
+    return f;
+  };
+
+  const fa = await getFile('A_test.mp4');
+  const fb = await getFile('B_test.mp4');
+  ok(true, `素材を読めた: A ${(fa.size / 1024).toFixed(0)}KB / B ${(fb.size / 1024).toFixed(0)}KB`);
+
+  // --- メタデータ ---
+  const ma = await readMeta(fa);
+  const mb = await readMeta(fb);
+  info(`A: 長さ ${ma.duration.toFixed(2)}秒 / 音声 ${ma.hasAudio} / 撮影時刻 ${ma.creationMs}`);
+  info(`B: 長さ ${mb.duration.toFixed(2)}秒 / 音声 ${mb.hasAudio} / 撮影時刻 ${mb.creationMs}`);
+  ok(Math.abs(ma.duration - 70) < 0.2, `A の長さを読めた: ${ma.duration.toFixed(2)}秒（期待 70）`);
+  ok(Math.abs(mb.duration - 73.13) < 0.2, `B の長さを読めた: ${mb.duration.toFixed(2)}秒（期待 73.13）`);
+  ok(ma.hasAudio === true && mb.hasAudio === true, '音声トラックを検出できた');
+
+  // --- 音声が抜けるか ---
+  const pcmA = await extractSyncPCM(fa, 0, 60);
+  ok(pcmA.length > 0, `A から PCM を抜けた: ${pcmA.length} サンプル`
+     + `（期待 ${60 * SYNC_RATE} 前後）`);
+  const lenOk = Math.abs(pcmA.length - 60 * SYNC_RATE) < SYNC_RATE;
+  ok(lenOk, `抜いた長さが指定どおり: ${(pcmA.length / SYNC_RATE).toFixed(2)}秒`);
+
+  // --- 頭出しが正確か（移植元で concat 経由だと 1.01秒 ずれた件） ---
+  // 同じ区間を「0秒から60秒抜いて後半30秒を取る」のと
+  // 「30秒目から30秒抜く」のとで、同じ波形になるか確かめる。
+  const whole = await extractSyncPCM(fa, 0, 60);
+  const tail = whole.slice(30 * SYNC_RATE, 60 * SYNC_RATE);
+  const direct = await extractSyncPCM(fa, 30, 30);
+
+  const eTail = buildEnvelope(tail, SYNC_RATE, ENV_RATE);
+  const eDirect = buildEnvelope(direct, SYNC_RATE, ENV_RATE);
+  const seekR = crossCorrelate(eTail, eDirect, ENV_RATE, 5);
+  ok(Math.abs(seekR.offsetSec) < 0.02,
+     `頭出しが正確: 直接 -ss した波形とのズレ ${seekR.offsetSec.toFixed(3)}秒`
+     + `（0 に近いこと。移植元では concat 経由で 1.01秒 ずれた）`);
+
+  // --- 本題: ブラウザで測ったズレが正解と合うか ---
+  const pa = await extractSyncPCM(fa, 0, 60);
+  const pb = await extractSyncPCM(fb, 0, 60);
+  const ea = buildEnvelope(pa, SYNC_RATE, ENV_RATE);
+  const eb = buildEnvelope(pb, SYNC_RATE, ENV_RATE);
+
+  const r = crossCorrelate(ea, eb, ENV_RATE, 15);
+  const err = Math.abs(r.offsetSec - TRUE_OFFSET);
+  ok(err < 0.05,
+     `crossCorrelate: ${r.offsetSec >= 0 ? '+' : ''}${r.offsetSec.toFixed(3)}秒`
+     + `（正解 +3.130 / 差 ${err.toFixed(3)}）`);
+
+  // 60秒を3窓にすると1窓20秒。重なり50%を守るので lag は±9秒まで。
+  // 探索幅を窓に見合った値にしないと、端の偶然一致を拾う。
+  const v = verifySync(ea, eb, ENV_RATE, 3, 9);
+  const verr = Math.abs(v.offsetSec - TRUE_OFFSET);
+  ok(verr < 0.05,
+     `verifySync: ${v.offsetSec >= 0 ? '+' : ''}${v.offsetSec.toFixed(3)}秒`
+     + ` / drift=${v.drift} / 窓 ${v.points.length}`
+     + ` / ばらつき ${v.maxDeviationSec.toFixed(3)}秒`);
+  // 60秒の素材が3窓（1窓20秒）に割れること。
+  // 窓が0だと多数決が働かず、誤検出を弾けない。
+  ok(v.points.length === 3,
+     `60秒が3窓に割れる: 窓 ${v.points.length}個`
+     + `（0 なら多数決が働いていない）`);
+
+  // 窓ごとの値も出す。
+  //
+  // ここで大事なのは「全窓が一致すること」ではない。
+  // 個々の窓は誤検出することがあり、しかも誤った窓のほうが
+  // スコアが高いことが実際にある（移植元の実測。この素材でも起きている）。
+  // verifySync は多数決で正解を選ぶ設計なので、
+  // 検証すべきは「多数決の結果が正解か」と「過半数が合意したか」。
+  if (v.points.length) {
+    info('窓ごとの測定値:');
+    for (const p of v.points) {
+      const outlier = Math.abs(p.offsetSec - v.offsetSec) > 0.5;
+      info(`  ${p.atSec.toFixed(0)}秒目 → ${p.offsetSec >= 0 ? '+' : ''}`
+           + `${p.offsetSec.toFixed(3)}秒 (スコア ${p.score.toFixed(3)})`
+           + (outlier ? '  ← 多数決で外れた窓' : ''));
+    }
+
+    const agreed = v.points.filter(
+      (p) => Math.abs(p.offsetSec - v.offsetSec) <= 0.5).length;
+    ok(agreed > v.points.length / 2,
+       `過半数の窓が合意した: ${agreed}/${v.points.length}窓`);
+    ok(!v.lowConfidence, `合意できたので lowConfidence=false`);
+
+    // 探索幅を窓に見合った値にしたので、全窓が一致するはず。
+    // ここが崩れるなら、重なり条件（MIN_OVERLAP_RATIO）が効いていない。
+    ok(agreed === v.points.length,
+       `全窓が一致する: ${agreed}/${v.points.length}窓`
+       + `（探索幅を窓に見合わせた効果）`);
+
+    // 誤検出した窓がスコア最高だった場合、スコアで選ぶ実装なら間違える。
+    // 多数決にしている理由がこれ。起きたときは記録に残す。
+    const best = v.points.reduce((a, b) => (b.score > a.score ? b : a));
+    if (Math.abs(best.offsetSec - v.offsetSec) > 0.5) {
+      info(`  ★ スコア最高の窓（${best.atSec.toFixed(0)}秒目 `
+           + `${best.offsetSec.toFixed(2)}秒 / スコア ${best.score.toFixed(3)}）は誤り。`);
+      info(`     スコアで選ぶ実装なら間違えていた。多数決が効いている。`);
+    }
+  }
+
+  // --- measurePair を通す（本番と同じ道） ---
+  // 撮影時刻を模して lastModified を入れた擬似ファイル情報を作る
+  const t0 = Date.now() - 100000;
+  const fileA = { name: 'A_test.mp4', file: fa, duration: ma.duration,
+                  creationMs: t0, lastModified: t0 + ma.duration * 1000 };
+  const fileB = { name: 'B_test.mp4', file: fb, duration: mb.duration,
+                  creationMs: t0, lastModified: t0 + mb.duration * 1000 };
+
+  const tl = buildTimeline([fileA], [fileB]);
+  const pairs = findOverlappingPairs(tl);
+  ok(pairs.length === 1, `組が1つ見つかる (実際 ${pairs.length})`);
+
+  if (pairs.length === 1) {
+    const res = await measurePair(pairs[0], (m) => info('  ' + m), 60);
+    ok(res.ok, `measurePair が通った${res.ok ? '' : ': ' + res.reason}`);
+    if (res.ok) {
+      info(`  撮影時刻の差 ${res.timeGapSec.toFixed(3)}秒`);
+      info(`  音で測った差 ${res.measuredSec.toFixed(3)}秒`);
+      info(`  合わせるズレ ${res.totalOffsetSec.toFixed(3)}秒`);
+      // 撮影時刻を同じにしたので、総ズレ = 音で測った差 = 3.13 になるはず
+      const terr = Math.abs(res.totalOffsetSec - TRUE_OFFSET);
+      ok(terr < 0.1, `measurePair の答え ${res.totalOffsetSec.toFixed(3)}秒`
+         + `（正解 +3.130 / 差 ${terr.toFixed(3)}）`);
+    }
+  }
+
+  // --- 反復しない音の素材でも測る -----------------------------------
+  //
+  // 上のビープ素材は音が規則的に繰り返すため、誤検出しやすい
+  // （実際に1窓が誤った。多数決で救われた）。
+  // 実素材はもっと不規則なので、そちらに近い素材でも確かめる。
+  say('dim', '');
+  info('── 反復しない音（ピンクノイズ）の素材でも測る ──');
+
+  const na = await getFile('A_noise.mp4');
+  const nb = await getFile('B_noise.mp4');
+
+  const npa = await extractSyncPCM(na, 0, 60);
+  const npb = await extractSyncPCM(nb, 0, 60);
+  const nea = buildEnvelope(npa, SYNC_RATE, ENV_RATE);
+  const neb = buildEnvelope(npb, SYNC_RATE, ENV_RATE);
+
+  const nr = crossCorrelate(nea, neb, ENV_RATE, 15);
+  ok(Math.abs(nr.offsetSec - TRUE_OFFSET) < 0.05,
+     `crossCorrelate: ${nr.offsetSec >= 0 ? '+' : ''}${nr.offsetSec.toFixed(3)}秒`
+     + `（正解 +3.130）`);
+
+  const nv = verifySync(nea, neb, ENV_RATE, 3, 9);
+  ok(Math.abs(nv.offsetSec - TRUE_OFFSET) < 0.05,
+     `verifySync: ${nv.offsetSec >= 0 ? '+' : ''}${nv.offsetSec.toFixed(3)}秒`
+     + ` / drift=${nv.drift} / 窓 ${nv.points.length}`);
+
+  if (nv.points.length) {
+    info('窓ごとの測定値:');
+    for (const p of nv.points) {
+      info(`  ${p.atSec.toFixed(0)}秒目 → ${p.offsetSec >= 0 ? '+' : ''}`
+           + `${p.offsetSec.toFixed(3)}秒 (スコア ${p.score.toFixed(3)})`);
+    }
+    const spread = Math.max(...nv.points.map((p) => p.offsetSec))
+                 - Math.min(...nv.points.map((p) => p.offsetSec));
+    ok(spread < 0.05,
+       `反復しない音では全窓が一致する: ばらつき ${spread.toFixed(3)}秒`);
+    ok(nv.drift === false, 'drift=false（ずれは一定と判定）');
+  }
+
+} catch (err) {
+  ok(false, '例外が出た', err.stack || err.message);
+}
+
+say(fail === 0 ? 'ok' : 'bad',
+    fail === 0 ? '━━━ すべて通った ━━━' : `━━━ ${fail}件 失敗 ━━━`);
+document.title = fail === 0 ? 'WASM_PASS' : 'WASM_FAIL';
+
+// ヘッドレスで回したとき、結果をサーバーに渡す（画面を見られないため）。
+// 送るのはこのテキストだけ。動画は送らない。
+try {
+  await fetch('/__test_result', {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' },
+    body: `${fail === 0 ? 'PASS' : 'FAIL'} (失敗 ${fail}件)\n\n` + plain.join('\n'),
+  });
+} catch { /* 普通にブラウザで開いたときは送り先が無くてよい */ }
+</script>
+</body>
+</html>
