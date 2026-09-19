@@ -44,8 +44,22 @@ export const MIN_OVERLAP_SEC = 10;
  * ここで出すのは「どのあたりを探すか」の当たりであって、
  * 答えではない。音で測って上書きする。
  *
- * 撮影時刻が読めないファイルは、名前順で後ろに積む
- * （重なっている前提で測りにいく）。
+ * ■ 撮影時刻が「録画開始」か「録画終了」か分からない
+ *
+ * 実素材（916まとめ）で:
+ *
+ *   mov: 08:32:36 / 661秒  ← 録画**開始**を記録
+ *   mp4: 08:43:37 / 659秒  ← 録画**終了**を記録
+ *
+ * 同じ11分の場面を撮った2本なのに、記録している意味が違う。
+ * どちらも「開始」だと思って並べると 11分1秒 ずれ、
+ * 重なりが 0.3秒 しか無いことになって「重なっていない」と
+ * 判定されてしまう（2026-09-19 の不具合）。
+ *
+ * そこで、時刻ごとに「開始かもしれない / 終了かもしれない」の
+ * 2案を持ち、**全体の重なりがいちばん大きくなる組み合わせ**を選ぶ。
+ * 2台のカメラは同じ時間帯を撮っているはず、という事実を使う。
+ * （旧 timeline.js の resolveRecordingTimes と同じ考え方）
  */
 export function guessStarts(files) {
   const withTime = files.filter((f) => f.creationMs);
@@ -53,8 +67,49 @@ export function guessStarts(files) {
     // 手がかりが無い。全部 0 から始まっていることにして音で測る。
     return files.map(() => 0);
   }
-  const base = Math.min(...withTime.map((f) => f.creationMs));
-  return files.map((f) => (f.creationMs ? (f.creationMs - base) / 1000 : 0));
+
+  // 各ファイルの候補。[埋め込みが開始とみた場合, 終了とみた場合]
+  const cands = files.map((f) => {
+    if (!f.creationMs) return [0];
+    const durMs = (f.duration || 0) * 1000;
+    return [f.creationMs, f.creationMs - durMs];
+  });
+
+  const idx = files.map(() => 0);
+  const startMs = () => files.map((f, i) => cands[i][idx[i]]);
+
+  // 全組み合わせの重なりの合計。大きいほど「同じ時間帯を撮っている」
+  const totalOverlap = () => {
+    const st = startMs();
+    let sum = 0;
+    for (let i = 0; i < files.length; i++) {
+      for (let j = i + 1; j < files.length; j++) {
+        const ai = st[i], aj = st[j];
+        const di = (files[i].duration || 0) * 1000;
+        const dj = (files[j].duration || 0) * 1000;
+        sum += Math.max(0, Math.min(ai + di, aj + dj) - Math.max(ai, aj));
+      }
+    }
+    return sum;
+  };
+
+  // 1本ずつ案を切り替えてみて、重なりが増えるなら採用する。
+  // 変化が無くなるまで繰り返す（数本なので数回で収束する）。
+  for (let pass = 0; pass < 4; pass++) {
+    let changed = false;
+    for (let i = 0; i < files.length; i++) {
+      if (cands[i].length < 2) continue;
+      const before = totalOverlap();
+      idx[i] = 1 - idx[i];
+      if (totalOverlap() <= before) idx[i] = 1 - idx[i];
+      else changed = true;
+    }
+    if (!changed) break;
+  }
+
+  const st = startMs();
+  const base = Math.min(...st.filter((v, i) => files[i].creationMs));
+  return files.map((f, i) => (f.creationMs ? (st[i] - base) / 1000 : 0));
 }
 
 /**

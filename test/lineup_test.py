@@ -32,12 +32,57 @@ def near(actual, expected, tol, label):
 
 
 def guess_starts(files):
+    """
+    撮影時刻から推定開始位置を出す。
+
+    埋め込み時刻が「録画開始」か「録画終了」か分からないので、
+    両方の案を試して**全体の重なりが最大**になる組み合わせを選ぶ。
+    """
     with_time = [f for f in files if f.get('creationMs')]
     if not with_time:
         return [0] * len(files)
-    base = min(f['creationMs'] for f in with_time)
-    return [((f['creationMs'] - base) / 1000 if f.get('creationMs') else 0)
-            for f in files]
+
+    cands = []
+    for f in files:
+        if not f.get('creationMs'):
+            cands.append([0])
+        else:
+            dur_ms = f.get('duration', 0) * 1000
+            cands.append([f['creationMs'], f['creationMs'] - dur_ms])
+
+    idx = [0] * len(files)
+
+    def starts():
+        return [cands[i][idx[i]] for i in range(len(files))]
+
+    def total():
+        st = starts()
+        s = 0
+        for i in range(len(files)):
+            for j in range(i + 1, len(files)):
+                di = files[i].get('duration', 0) * 1000
+                dj = files[j].get('duration', 0) * 1000
+                s += max(0, min(st[i] + di, st[j] + dj) - max(st[i], st[j]))
+        return s
+
+    for _ in range(4):
+        changed = False
+        for i in range(len(files)):
+            if len(cands[i]) < 2:
+                continue
+            before = total()
+            idx[i] = 1 - idx[i]
+            if total() <= before:
+                idx[i] = 1 - idx[i]
+            else:
+                changed = True
+        if not changed:
+            break
+
+    st = starts()
+    base = min(st[i] for i in range(len(files)) if files[i].get('creationMs'))
+    return [((st[i] - base) / 1000 if files[i].get('creationMs') else 0)
+            for i in range(len(files))]
 
 
 def overlap_of(a_start, a_dur, b_start, b_dur):
@@ -107,11 +152,16 @@ print('音で測った差は -5.18秒、正しい置き場所の差は 3.50秒')
 print()
 
 mov = mk('916まとめ.mov', T0, 661.3)
-mp4 = mk('916まとめ.mp4', T0 + 661_000, 659.3)   # 11分1秒後
-# 推定では mp4 が 661秒 後。実際に重なるのは... 重なり 0 に近い
-res = line_up([mov, mp4], {('916まとめ.mov', '916まとめ.mp4'): 0.0})
-print('  推定だけで並べると:', [(r['name'], round(r['startSec'], 2)) for r in res])
-ok(True, '（撮影時刻だけでは重ならないことの確認）')
+mp4 = mk('916まとめ.mp4', T0 + 661_000, 659.3)   # 11分1秒後を記録
+
+g = guess_starts([mov, mp4])
+ov = min(g[0] + 661.3, g[1] + 659.3) - max(g[0], g[1])
+print('  推定開始: mov %.1f秒 / mp4 %.1f秒' % (g[0], g[1]))
+print('  重なり  : %.1f秒' % ov)
+ok(ov >= MIN_OVERLAP_SEC,
+   '重なっていると判定される（素直に並べると 0.3秒 で切り捨てられていた）',
+   '(%.1f秒)' % ov)
+near(g[1] - g[0], 1.7, 0.1, 'mp4 の時刻を「録画終了」と解釈して 1.7秒差になる')
 
 print()
 print('=== 撮影時刻が正しい素材で、音の補正が効くか ===')
