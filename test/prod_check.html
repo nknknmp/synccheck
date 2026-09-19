@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><title>WAIT</title></head><body>
+<pre id="out">確認中...</pre>
+<script>
+/*
+ * 公開先（GitHub Pages）で Service Worker が本当にキャッシュを
+ * 作り切るかを確かめる。結果を <title> に書くので --dump-dom で拾える。
+ * 本番では serve.py の /__test_result が無いため。
+ */
+const lines = [];
+const say = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+const done = (v) => { document.title = v; };
+async function main() {
+  for (const r of await navigator.serviceWorker.getRegistrations()) await r.unregister();
+  for (const k of await caches.keys()) await caches.delete(k);
+  const reg = await navigator.serviceWorker.register('../sw.js', { scope: '../' });
+  say('scope=' + reg.scope);
+  await navigator.serviceWorker.ready;
+  const deadline = Date.now() + 240000;
+  let cache = null, keys = [];
+  while (Date.now() < deadline) {
+    const names = (await caches.keys()).filter(n => n.startsWith('synccheck-'));
+    if (names.length) {
+      cache = await caches.open(names[0]);
+      keys = await cache.keys();
+      const w = await cache.match('../vendor/core/ffmpeg-core.wasm');
+      if (w && (await w.blob()).size > 30000000) break;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  const w = await cache.match('../vendor/core/ffmpeg-core.wasm');
+  const size = w ? (await w.blob()).size : 0;
+  say('件数=' + keys.length + ' wasm=' + size);
+  if (size < 30000000) throw new Error('wasm 不足: ' + size);
+  for (const u of ['../index.html','../manifest.webmanifest','../icon.svg','../src/audio.js']) {
+    if (!await cache.match(u)) throw new Error('欠け:' + u);
+  }
+  done('PASS n=' + keys.length + ' wasm=' + size);
+}
+main().catch(e => { say('FAIL ' + e.message); done('FAIL ' + e.message); });
+</script></body></html>
