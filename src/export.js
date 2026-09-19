@@ -26,7 +26,56 @@ export function fmtOffset(sec) {
   return `${sec >= 0 ? '+' : ''}${sec.toFixed(2)}秒`;
 }
 
+/**
+ * 秒をフレーム数に直す。
+ *
+ * 編集ソフトはフレーム単位でしか動かせないので、
+ * 秒より frame のほうが現場では使いやすい。
+ *
+ * ■ 29.97 のような値の扱い
+ *
+ * 画面の選択肢は 29.97 / 23.98 と表示しているが、実際の値は
+ * 30000/1001（= 29.9700299...）と 24000/1001。
+ * 長い素材だと、29.97 で計算するか 30000/1001 で計算するかで
+ * 答えが1フレーム変わることがあるため、分数で持つ。
+ */
+export function realFps(fps) {
+  if (Math.abs(fps - 29.97) < 0.01) return 30000 / 1001;
+  if (Math.abs(fps - 23.98) < 0.02) return 24000 / 1001;
+  if (Math.abs(fps - 59.94) < 0.01) return 60000 / 1001;
+  return fps;
+}
+
+/**
+ * ズレをフレーム数にする。四捨五入した整数を返す。
+ *
+ * @returns {number} 正なら「後ろへ」、負なら「前へ」動かすフレーム数
+ */
+export function toFrames(sec, fps) {
+  return Math.round(sec * realFps(fps));
+}
+
+/**
+ * フレーム数の表示。「+105 フレーム」のように符号を付ける。
+ */
+export function fmtFrames(sec, fps) {
+  const f = toFrames(sec, fps);
+  return `${f >= 0 ? '+' : ''}${f} フレーム`;
+}
+
+/**
+ * 端数がどれだけ出たかを秒で返す。
+ *
+ * フレーム単位に丸めると必ず誤差が出る。30fps なら最大 1/60秒（0.017秒）。
+ * それが許せない精度のときに気づけるよう、画面に出すために使う。
+ */
+export function frameRemainderSec(sec, fps) {
+  const r = realFps(fps);
+  return sec - Math.round(sec * r) / r;
+}
+
 export function buildReportText(results, summary, meta = {}) {
+  const fps = meta.fps || 30;
   const L = [];
   L.push('════════════════════════════════════════');
   L.push(' SyncCheck 測定結果');
@@ -35,6 +84,7 @@ export function buildReportText(results, summary, meta = {}) {
   L.push(`測った日時: ${new Date().toLocaleString('ja-JP')}`);
   if (meta.groupAName) L.push(`A側（基準）: ${meta.groupAName}`);
   if (meta.groupBName) L.push(`B側: ${meta.groupBName}`);
+  L.push(`フレームレート: ${fps}fps`);
   L.push(`組の数: ${summary.total}（測れた ${summary.ok} / 測れなかった ${summary.failed}）`);
   L.push('');
 
@@ -54,8 +104,15 @@ export function buildReportText(results, summary, meta = {}) {
       continue;
     }
 
-    L.push(`  合わせるズレ  ${fmtOffset(r.totalOffsetSec)}`);
-    L.push(`    B の 0秒目 = A の ${fmtOffset(r.totalOffsetSec)} の位置`);
+    const fr = toFrames(r.totalOffsetSec, fps);
+    L.push(`  合わせるズレ  ${fmtFrames(r.totalOffsetSec, fps)}`
+           + `（${fmtOffset(r.totalOffsetSec)}）`);
+    L.push(`    B側を ${Math.abs(fr)} フレーム `
+           + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}へ`);
+    const rem = frameRemainderSec(r.totalOffsetSec, fps);
+    if (Math.abs(rem) >= 0.005) {
+      L.push(`    ※ フレームに丸めた端数 ${(rem * 1000).toFixed(0)}ミリ秒`);
+    }
     L.push(`  内訳`);
     L.push(`    撮影時刻の差   ${fmtOffset(r.timeGapSec)}`);
     L.push(`    音で測った差   ${fmtOffset(r.measuredSec)}`);

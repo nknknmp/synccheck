@@ -174,6 +174,11 @@
   .hidden { display: none !important; }
   /* いま動いている版。古いキャッシュが残っていないか目で見て分かるように
      （符号バグを直しても端末に届かない事故があったため） */
+  /* 結果カードの補助表示 */
+  .expl .sub2 { color: var(--dim); font-weight: normal; margin-left: 6px;
+                font-size: 13px; }
+  .rem { font-size: 12px; color: var(--warn); margin-top: 4px; }
+  .hint { font-size: 12px; color: var(--dim); }
   h1 .ver { font-size: 12px; color: var(--dim); font-weight: normal;
             margin-left: 8px; border: 1px solid var(--line);
             border-radius: 10px; padding: 1px 8px; vertical-align: middle; }
@@ -183,7 +188,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">2カメのズレを測る</span>
-      <span class="ver" id="ver" title="いま動いている版">v3</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v4</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -235,6 +240,23 @@
     </label>
   </div>
 
+  <div class="row">
+    <label class="inline">
+      フレームレート
+      <select id="fps">
+        <option value="30" selected>30</option>
+        <option value="29.97">29.97</option>
+        <option value="25">25</option>
+        <option value="24">24</option>
+        <option value="23.98">23.98</option>
+        <option value="50">50</option>
+        <option value="60">60</option>
+        <option value="59.94">59.94</option>
+      </select>
+    </label>
+    <span class="hint" id="fpsHint">素材から自動で読みます</span>
+  </div>
+
   <div class="bar" id="bar" style="display:none"><i></i></div>
   <div id="log"></div>
 
@@ -245,16 +267,7 @@
     <button class="ghost" id="expCsv">CSV で保存</button>
     <button class="ghost" id="expJson">JSON で保存</button>
     <button class="ghost" id="expFcp">fcpxml で保存</button>
-    <label class="inline">
-      fcpxml のフレームレート
-      <select id="fps">
-        <option value="30" selected>30</option>
-        <option value="29.97">29.97</option>
-        <option value="25">25</option>
-        <option value="24">24</option>
-        <option value="60">60</option>
-      </select>
-    </label>
+    <span class="hint">fcpxml は上のフレームレートで書き出します</span>
   </div>
 
 </div>
@@ -264,11 +277,14 @@ import { buildTimeline, findOverlappingPairs, findOrphans } from './src/timeline
 import { measureAll, summarize } from './src/measure.js';
 import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
 import { buildReportText, buildCSV, buildJSON, buildFCPXML, saveText,
-         fmtOffset, fmtClock } from './src/export.js';
+         fmtOffset, fmtClock, fmtFrames, toFrames,
+         frameRemainderSec } from './src/export.js';
 
 const groups = { A: [], B: [] };
 let lastResults = null;
 let lastSummary = null;
+// フレームレートを変えたとき、測り直さず描き直すために持っておく
+let lastOrphans = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -359,6 +375,7 @@ function render() {
 $('clear').onclick = () => {
   groups.A = []; groups.B = [];
   lastResults = null;
+  lastOrphans = null;
   $('results').innerHTML = '';
   $('exportRow').classList.add('hidden');
   $('log').textContent = '';
@@ -389,6 +406,7 @@ $('run').onclick = async () => {
           const m = await readMeta(f.file);
           f.creationMs = m.creationMs;
           f.hasAudio = m.hasAudio;
+          f.fps = m.fps;
           if (m.duration > 0) f.duration = m.duration;
         } catch (err) {
           log(`  ${f.name}: 読めませんでした（${err.message}）`);
@@ -398,8 +416,10 @@ $('run').onclick = async () => {
       setBar((++n / all.length) * 0.25);
       log(`  ${f.name}: ${f.duration ? fmtClock(f.duration) : '長さ不明'}`
           + `${f.creationMs ? ' / 撮影時刻 ' + new Date(f.creationMs).toLocaleString('ja-JP') : ' / 撮影時刻なし'}`
+          + `${f.fps ? ' / ' + f.fps + 'fps' : ''}`
           + `${f.hasAudio === false ? ' / 音声なし' : ''}`);
     }
+    applyDetectedFps();
     render();
 
     const noAudio = all.filter((f) => f.hasAudio === false);
@@ -441,6 +461,7 @@ $('run').onclick = async () => {
 
     lastResults = results;
     lastSummary = summarize(results);
+    lastOrphans = orphans;
     showResults(results, lastSummary, orphans);
     $('exportRow').classList.remove('hidden');
     setBar(1);
@@ -459,6 +480,40 @@ function setBar(p) {
 function showError(msg) {
   $('results').innerHTML =
     `<div class="warnbox"><strong>測れませんでした</strong><br>${msg}</div>`;
+}
+
+/**
+ * 素材から読めたフレームレートを選択欄に反映する。
+ *
+ * A側とB側で違うことがある（別のカメラなので当然ありうる）。
+ * そのときは基準である A側 を採り、画面に断りを出す。
+ * 勝手に決めて黙っていると、フレーム数が1つずれても気づけない。
+ */
+function applyDetectedFps() {
+  const hint = $('fpsHint');
+  const found = [...groups.A, ...groups.B].filter((f) => f.fps).map((f) => f.fps);
+  if (found.length === 0) {
+    hint.textContent = '素材から読めなかったので手で選んでください';
+    return;
+  }
+
+  // 選択肢にある値のうち、いちばん近いものを選ぶ
+  const opts = [...$('fps').options].map((o) => Number(o.value));
+  const nearest = (v) => opts.reduce((best, o) =>
+    Math.abs(o - v) < Math.abs(best - v) ? o : best, opts[0]);
+
+  // 基準は A側。A に読めたものが無ければ最初に読めたものを使う。
+  const aFps = groups.A.find((f) => f.fps);
+  const pick = nearest(aFps ? aFps.fps : found[0]);
+  $('fps').value = String(pick);
+
+  const uniq = [...new Set(found.map((v) => nearest(v)))];
+  if (uniq.length > 1) {
+    hint.textContent =
+      `素材ごとに違います（${uniq.join(' / ')}）。A側の ${pick} を使います`;
+  } else {
+    hint.textContent = `素材から読みました（${pick}fps）`;
+  }
 }
 
 function showResults(results, summary, orphans) {
@@ -517,15 +572,28 @@ function showResults(results, summary, orphans) {
         + `<td>${p.score.toFixed(3)}</td></tr>`;
     }).join('');
 
+    const fps = Number($('fps').value);
+    const frames = toFrames(r.totalOffsetSec, fps);
+    const rem = frameRemainderSec(r.totalOffsetSec, fps);
+    const dir = r.totalOffsetSec >= 0 ? '後ろ' : '前';
+
     d.innerHTML =
       `<div class="head">`
       + `<span class="names">${r.label}</span>`
-      + `<span class="big">${fmtOffset(r.totalOffsetSec)}</span>`
+      + `<span class="big">${fmtFrames(r.totalOffsetSec, fps)}</span>`
       + `</div>`
-      + `<div class="expl">B側を ${Math.abs(r.totalOffsetSec).toFixed(2)}秒 `
-      + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}にずらすと合います</div>`
+      + `<div class="expl">B側を <strong>${Math.abs(frames)} フレーム</strong> `
+      + `${dir}にずらすと合います`
+      + `<span class="sub2">（${fps}fps / ${fmtOffset(r.totalOffsetSec)}）</span>`
+      + `</div>`
+      // フレームに丸めた端数。大きいときだけ出す（30fps で 0.017秒 が上限）
+      + (Math.abs(rem) >= 0.005
+        ? `<div class="rem">フレームに合わせるため ${Math.abs(rem * 1000).toFixed(0)}ミリ秒 の端数が出ます</div>`
+        : '')
       + flags.join('')
       + `<dl class="kv">`
+      + `<dt>ずらす量</dt><dd>${Math.abs(frames)} フレーム`
+      + `（${fmtOffset(r.totalOffsetSec)}）</dd>`
       + `<dt>撮影時刻の差</dt><dd>${fmtOffset(r.timeGapSec)}</dd>`
       + `<dt>音で測った差</dt><dd>${fmtOffset(r.measuredSec)}</dd>`
       + `<dt>重なり</dt><dd>${r.pair.overlapSec.toFixed(1)}秒`
@@ -558,6 +626,7 @@ $('expTxt').onclick = () => {
     buildReportText(lastResults, lastSummary, {
       groupAName: groups.A.map((f) => f.name).join(', '),
       groupBName: groups.B.map((f) => f.name).join(', '),
+      fps: Number($('fps').value),
     }), 'text/plain');
 };
 
@@ -580,6 +649,12 @@ $('expFcp').onclick = () => {
   } catch (err) {
     alert('書き出せませんでした: ' + err.message);
   }
+};
+
+// フレームレートを変えたら、測り直さずに表示だけ作り直す。
+// 測定値は秒で持っているので、換算をやり直すだけでよい。
+$('fps').onchange = () => {
+  if (lastResults) showResults(lastResults, lastSummary, lastOrphans);
 };
 
 render();

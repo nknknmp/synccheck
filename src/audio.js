@@ -180,7 +180,25 @@ export async function readMeta(file) {
     // 音声トラックが無いファイルは同期を測れないので先に分かるようにする
     const hasAudio = /Stream #\d+:\d+.*: Audio:/.test(text);
 
-    return { duration, creationMs, hasAudio, log: text };
+    // フレームレート（ズレをフレーム数で見せるのに使う）
+    //
+    //   Video: hevc ..., 1280x720, 4841 kb/s, 30 fps, 30 tbr, ...
+    //
+    // 入力側の行だけを見る。-f null で出る出力側の行にも fps があり、
+    // そちらは変換後の値なので素材のものではない。
+    let fps = null;
+    const vLine = text.match(/Stream #\d+:\d+[^
+]*: Video:[^
+]*/);
+    if (vLine) {
+      const m = vLine[0].match(/([\d.]+)\s*fps/);
+      if (m) {
+        const v = Number(m[1]);
+        if (v > 0 && v < 1000) fps = v;
+      }
+    }
+
+    return { duration, creationMs, hasAudio, fps, log: text };
   } finally {
     ff.off('log', collect);
     try { await ff.deleteFile(input); } catch { /* 消せなくても進む */ }
