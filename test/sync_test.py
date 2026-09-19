@@ -63,7 +63,7 @@ def cross_correlate(a, b, sample_rate, max_lag_sec=30,
 
     best_lag, best_score = 0, -math.inf
     for lag in range(-max_lag, max_lag + 1):
-        # b が lag だけ遅れているとき b[i+lag] = a[i]
+        # a[i] と b[i+lag] が一致 = b のほうが lag だけ先に始まっている
         start = max(0, -lag)
         end = min(len(na), len(nb) - lag)
         count = end - start
@@ -79,7 +79,8 @@ def cross_correlate(a, b, sample_rate, max_lag_sec=30,
     if best_score == -math.inf:
         return {"offsetSec": 0, "score": -math.inf, "tooShort": True}
 
-    return {"offsetSec": best_lag / sample_rate, "score": best_score}
+    # best_lag は「b の先行量」。返すのは「b の遅れ」なので反転する。
+    return {"offsetSec": -best_lag / sample_rate, "score": best_score}
 
 
 MIN_WINDOW_SEC = 15
@@ -303,12 +304,35 @@ def make_envelope(len_sec, env_rate, seed=1):
 
 
 def delay_envelope(env, env_rate, delay_sec):
+    """
+    「delay_sec 秒 遅れて始まった素材」を作る。
+
+    out[i] = env[i - shift] なので、env の 0秒の音が out では
+    delay_sec 秒の位置に現れる = out のほうが後から始まっている。
+
+    ■ 2026-09-19: ここの意味を取り違えていた
+
+    「遅れて始まった素材」を渡しているのに、期待値を +delay_sec に
+    していた。合わせるには前へ動かす必要があるので、正しくは
+    -delay_sec。cross_correlate の符号の誤りと打ち消し合って、
+    27件すべて通ってしまっていた。
+
+    そのため、期待値は shift_to_align() で書く。
+    """
     shift = round(delay_sec * env_rate)
     out = []
     for i in range(len(env)):
         src = i - shift
         out.append(env[src] if 0 <= src < len(env) else 0.02)
     return out
+
+
+def shift_to_align(delay_sec):
+    """
+    delay_envelope(a, rate, delay_sec) で作った b を a に合わせるとき、
+    b をずらすべき秒数。遅れて始まったなら前へ戻すので符号が逆。
+    """
+    return -delay_sec
 
 
 ENV_RATE = 100
@@ -324,12 +348,14 @@ print("\n=== cross_correlate の符号 ===")
 a = make_envelope(180, ENV_RATE, 7)
 b = delay_envelope(a, ENV_RATE, 3.13)
 r = cross_correlate(a, b, ENV_RATE, 15)
-near(r["offsetSec"], 3.13, 0.02, "b を遅らせたら正の値が返る")
+near(r["offsetSec"], shift_to_align(3.13), 0.02,
+     "b が遅れて始まったら、前へ戻す量（負）が返る")
 
 a = make_envelope(180, ENV_RATE, 11)
 b = delay_envelope(a, ENV_RATE, -2.5)
 r = cross_correlate(a, b, ENV_RATE, 15)
-near(r["offsetSec"], -2.5, 0.02, "b が先なら負の値が返る")
+near(r["offsetSec"], shift_to_align(-2.5), 0.02,
+     "b が先に始まったら、後ろへ送る量（正）が返る")
 
 # 測定点を変えても同じ答えになること（符号が逆だと2倍の速さで動く）
 a = make_envelope(300, ENV_RATE, 13)
@@ -337,14 +363,15 @@ b = delay_envelope(a, ENV_RATE, 4.0)
 r1 = cross_correlate(a[:100 * ENV_RATE], b[:100 * ENV_RATE], ENV_RATE, 15)
 r2 = cross_correlate(a[120 * ENV_RATE:220 * ENV_RATE],
                      b[120 * ENV_RATE:220 * ENV_RATE], ENV_RATE, 15)
-near(r1["offsetSec"], 4.0, 0.02, "前半で測っても 4.0")
-near(r2["offsetSec"], 4.0, 0.02, "後半で測っても 4.0（測定点に依存しない）")
+near(r1["offsetSec"], shift_to_align(4.0), 0.02, "前半で測っても同じ")
+near(r2["offsetSec"], shift_to_align(4.0), 0.02,
+     "後半で測っても同じ（測定点に依存しない）")
 
 print("\n=== verify_sync ===")
 a = make_envelope(600, ENV_RATE, 17)
 b = delay_envelope(a, ENV_RATE, 1.75)
 r = verify_sync(a, b, ENV_RATE, 5, 15)
-near(r["offsetSec"], 1.75, 0.05, "5窓の多数決で 1.75 が出る")
+near(r["offsetSec"], shift_to_align(1.75), 0.05, "5窓の多数決で一致する")
 ok(r["drift"] is False, "ずれが一定なら drift=False")
 ok(r["lowConfidence"] is False, "合意できているので lowConfidence=False")
 ok(len(r["points"]) == 5, f"窓が5つ測れている (実際 {len(r['points'])})")
@@ -353,7 +380,7 @@ a = make_envelope(40, ENV_RATE, 19)
 b = delay_envelope(a, ENV_RATE, 0.8)
 r = verify_sync(a, b, ENV_RATE, 5, 15)
 ok(r["singleWindow"] is True, "30秒に割れない素材は singleWindow で返る")
-near(r["offsetSec"], 0.8, 0.05, "短くても値は出る")
+near(r["offsetSec"], shift_to_align(0.8), 0.05, "短くても値は出る")
 
 print("\n=== 重なり条件（端の偶然一致を拾わないこと） ===")
 # 短い窓に広い探索幅を与えたとき、正しい答えを保てるか。
@@ -361,21 +388,22 @@ print("\n=== 重なり条件（端の偶然一致を拾わないこと） ===")
 a = make_envelope(20, ENV_RATE, 29)
 b = delay_envelope(a, ENV_RATE, 3.13)
 r_wide = cross_correlate(a, b, ENV_RATE, 15)   # 窓20秒に対して探索15秒（広すぎる）
-near(r_wide["offsetSec"], 3.13, 0.05,
+near(r_wide["offsetSec"], shift_to_align(3.13), 0.05,
      "20秒の窓に探索15秒でも正しい答えを保つ")
 
 # 探索幅が窓に対して大きすぎると tooShort が返る
 tiny = make_envelope(3, ENV_RATE, 31)
 tiny_b = delay_envelope(tiny, ENV_RATE, 0.5)
 r_tiny = cross_correlate(tiny, tiny_b, ENV_RATE, 30)
-ok(r_tiny.get("tooShort") is True or abs(r_tiny["offsetSec"] - 0.5) < 0.1,
+ok(r_tiny.get("tooShort") is True
+   or abs(r_tiny["offsetSec"] - shift_to_align(0.5)) < 0.1,
    f"3秒の窓に探索30秒 → tooShort か正答 (実際 {r_tiny})")
 
 # verify_sync が tooShort の窓を数に入れないこと
 short_a = make_envelope(50, ENV_RATE, 37)
 short_b = delay_envelope(short_a, ENV_RATE, 1.0)
 rv = verify_sync(short_a, short_b, ENV_RATE, 3, 9)
-ok(all(abs(p["offsetSec"] - 1.0) < 0.05 for p in rv["points"]),
+ok(all(abs(p["offsetSec"] - shift_to_align(1.0)) < 0.05 for p in rv["points"]),
    f"窓に見合った探索幅なら全窓一致 ({[round(p['offsetSec'],2) for p in rv['points']]})")
 
 print("\n=== resolve_recording_times ===")

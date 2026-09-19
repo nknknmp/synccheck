@@ -89,10 +89,20 @@ export const MIN_OVERLAP_RATIO = 0.5;
  * ■ 符号は紙の上で決めないこと（移植元で1度間違えて、正しい部品まで疑った）
  *
  *   crossCorrelate(a, b) は a[i] と b[i+lag] を突き合わせる。
- *   a = 横（LS秒目から）、b = 縦（PS秒目から）なら
- *     横(LS + i) = 縦(PS + i + lag)
- *   「縦のτ = 横のτ+D」と定義するなら
- *     LS = PS + lag + D   ⇒   D = LS - PS - lag
+ *   一致したということは「a の i 番目と同じ音が b の i+lag 番目にある」。
+ *   つまり b のほうが lag だけ**先に**始まっている（b が先行）。
+ *   求めたいのは「b の遅れ」なので、符号を反転して返す。
+ *
+ *   ■ 2026-09-19: ここが逆だったのを実素材で見つけて直した
+ *
+ *   11分の2カメ素材（正解 -3.50秒）で +6.90秒 と出た。
+ *   ネイティブ ffmpeg で全域相関を取ると -3.50秒 で、
+ *   5つの窓すべてが一致（ばらつき 0.01秒）。
+ *   大きさは合っていて符号だけが逆だった。
+ *
+ *   以前のテスト素材は A と B がほぼ対称で、符号を逆にしても
+ *   通ってしまうものだった（だから27件通っても気づけなかった）。
+ *   非対称な素材での検算を test/sign_test.py に足してある。
  *
  *   符号が逆だと、測定点をずらしたとき答えが2倍の速さで動く。
  *   疑ったら測定点を変えて同じ答えになるか確かめること。
@@ -120,8 +130,9 @@ export function crossCorrelate(a, b, sampleRate, maxLagSec = 30,
   let bestScore = -Infinity;
 
   for (let lag = -maxLag; lag <= maxLag; lag++) {
-    // b が lag だけ遅れているとき b[i+lag] = a[i] になる。
-    // よって a[i] と b[i+lag] を突き合わせ、最も一致する lag が「bの遅れ」。
+    // a[i] と b[i+lag] が一致するということは、a の i 番目と同じ音が
+    // b では i+lag 番目にある = b のほうが lag だけ先に始まっている。
+    // （戻り値では符号を反転して「b の遅れ」にする）
     const start = Math.max(0, -lag);
     const end = Math.min(na.length, nb.length - lag);
     const count = end - start;
@@ -146,7 +157,9 @@ export function crossCorrelate(a, b, sampleRate, maxLagSec = 30,
     return { offsetSec: 0, score: -Infinity, tooShort: true };
   }
 
-  return { offsetSec: bestLag / sampleRate, score: bestScore };
+  // bestLag は「b がどれだけ先行しているか」。
+  // この関数が返すのは「b の遅れ」なので符号を反転する。
+  return { offsetSec: -bestLag / sampleRate, score: bestScore };
 }
 
 /**
