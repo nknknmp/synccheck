@@ -172,12 +172,18 @@
   label.inline { font-size: 13px; color: var(--dim); display: flex;
                  align-items: center; gap: 6px; }
   .hidden { display: none !important; }
+  /* いま動いている版。古いキャッシュが残っていないか目で見て分かるように
+     （符号バグを直しても端末に届かない事故があったため） */
+  h1 .ver { font-size: 12px; color: var(--dim); font-weight: normal;
+            margin-left: 8px; border: 1px solid var(--line);
+            border-radius: 10px; padding: 1px 8px; vertical-align: middle; }
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <h1>SyncCheck<span class="sub">2カメのズレを測る</span></h1>
+  <h1>SyncCheck<span class="sub">2カメのズレを測る</span>
+      <span class="ver" id="ver" title="いま動いている版">v3</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -586,8 +592,24 @@ render();
  * （file:// で開いたときや、古い Safari では登録できない）。
  */
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('./sw.js');
+      // 新しい版が出ていないか毎回確かめる。
+      // 放っておくとブラウザ任せになり、直したものが端末に届かない。
+      reg.update().catch(() => {});
+      // 新しい Service Worker が待機に入ったら、次に開いたとき
+      // 確実に入れ替わるよう促す。
+      reg.addEventListener('updatefound', () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', () => {
+          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+            log('新しい版が届きました。開き直すと切り替わります');
+          }
+        });
+      });
+    } catch (_) { /* 登録できなくてもアプリは動く */ }
   });
 }
 </script>

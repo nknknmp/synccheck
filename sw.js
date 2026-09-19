@@ -12,7 +12,7 @@
  */
 
 // 中身を直したらこの番号を上げる。上げ忘れると古いままが出る。
-const VERSION = 'v2';
+const VERSION = 'v3';
 const CACHE = `synccheck-${VERSION}`;
 
 // 相対パスにしておく。GitHub Pages ではサイトが
@@ -85,24 +85,48 @@ self.addEventListener('fetch', (event) => {
   // 別オリジンには手を出さない。
   if (new URL(req.url).origin !== self.location.origin) return;
 
-  event.respondWith((async () => {
-    // キャッシュ優先。出先で回線があっても細いことがあるので、
-    // 手元にあるなら必ずそれを使う。
-    const hit = await caches.match(req, { ignoreSearch: true });
-    if (hit) return hit;
+  const url = new URL(req.url);
+  const isWasm = url.pathname.endsWith('.wasm');
 
+  event.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+
+    // ■ ffmpeg 本体（31MB）はキャッシュ優先
+    //
+    // 中身が変わることはまず無いし、毎回 31MB を取りに行くと
+    // 出先では即座に破綻する。VERSION を上げたときだけ入れ替わる。
+    if (isWasm) {
+      const hit = await cache.match(req, { ignoreSearch: true });
+      if (hit) return hit;
+    }
+
+    // ■ それ以外はネット優先（手が届くなら必ず新しいものを使う）
+    //
+    // 2026-09-19: ここがキャッシュ優先だったせいで、符号バグを
+    // 直して公開しても iPad に届かなかった。VERSION を上げても、
+    // 古い Service Worker が自分の持っている古いファイルを
+    // 返し続けるため、利用者側から直す手段が無い状態になる。
+    //
+    // 通信できるときは取りに行き、駄目ならキャッシュに落とす。
+    // オフラインでの起動はこれまでどおり効く。
     try {
-      const res = await fetch(req);
-      // 取れたものはついでに残す（次から圏外でも開ける）。
+      // 3秒で見切る。出先の細い回線で待たされ続けないため。
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 3000);
+      const res = await fetch(req, { signal: ctrl.signal });
+      clearTimeout(timer);
+
       if (res.ok && res.type === 'basic') {
-        const cache = await caches.open(CACHE);
         cache.put(req, res.clone());
       }
       return res;
     } catch (err) {
-      // 圏外でキャッシュにも無い。ナビゲーションなら入口を返す。
+      // 圏外・回線が細い・3秒で間に合わなかった
+      const hit = await cache.match(req, { ignoreSearch: true });
+      if (hit) return hit;
+
       if (req.mode === 'navigate') {
-        const shell = await caches.match('./index.html');
+        const shell = await cache.match('./index.html');
         if (shell) return shell;
       }
       throw err;
