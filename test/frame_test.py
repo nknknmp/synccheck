@@ -140,6 +140,23 @@ eq(frames_to_timecode(90, 30), '00:00:03:00', '90フレーム = 3秒ちょうど
 eq(frames_to_timecode(30, 29.97), '00:00:01:00', '29.97 もノンドロップで30コマ=1秒')
 
 print()
+print('=== 25fps（PAL・実素材で動作確認済み 2026-09-20）===')
+eq(to_frames(2.0, 25), 50, '25fps で 2秒 = 50フレーム')
+eq(frames_to_timecode(50, 25), '00:00:02:00', '50f = 2秒ちょうど')
+eq(frames_to_timecode(24, 25), '00:00:00:24', '24f = 0秒24フレーム（25fps の最後のコマ）')
+eq(frames_to_timecode(25, 25), '00:00:01:00', '25f で1秒に繰り上がる')
+eq(frames_to_timecode(3600 * 25, 25), '01:00:00:00', '1時間ぶん')
+# 30fps と取り違えていないか（同じ秒数でもフレーム数が違う）
+ok(to_frames(2.0, 25) != to_frames(2.0, 30),
+   '30fps とは違う値になる', '(25fps=%d / 30fps=%d)'
+   % (to_frames(2.0, 25), to_frames(2.0, 30)))
+
+print()
+print('=== 50fps ===')
+eq(to_frames(1.0, 50), 50, '50fps で 1秒 = 50フレーム')
+eq(frames_to_timecode(50, 50), '00:00:01:00', '50f = 1秒ちょうど')
+
+print()
 print('=== 置き場所（先に始まったほうが 0）===')
 # 実素材: B が 3.50秒 先行（-3.50秒）→ B を 0、A を 105
 a, b = placement(-3.50, 30)
