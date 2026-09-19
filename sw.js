@@ -12,7 +12,7 @@
  */
 
 // 中身を直したらこの番号を上げる。上げ忘れると古いままが出る。
-const VERSION = 'v12';
+const VERSION = 'v13';
 const CACHE = `synccheck-${VERSION}`;
 
 // 相対パスにしておく。GitHub Pages ではサイトが
@@ -28,6 +28,7 @@ const ASSETS = [
   './src/sync.js',
   './src/timeline.js',
   './src/lineup.js',
+  './src/bigfile.js',
   './vendor/ffmpeg/index.js',
   './vendor/ffmpeg/classes.js',
   './vendor/ffmpeg/const.js',

@@ -55,6 +55,8 @@ import { buildEnvelope, findOffsetFullRange, verifyOverlap } from './sync.js';
  */
 const SCAN_LEN_SEC = Infinity;
 
+
+
 /** これ未満しか重ならない組は測らない */
 export const MIN_OVERLAP_SEC = 20;
 
@@ -146,16 +148,35 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180,
 
   // ■ 1. 各ファイルの音を1回だけ読む
   //
-  // 総当たりで測るので、毎回抜き直すと本数の2乗で時間がかかる。
+  // 総当たりで照合するので、毎回抜き直すと本数の2乗で時間がかかる。
   // 先に全部の波形を作っておく。
+  //
+  // ■ 抜く秒数をそろえる（大きいファイル対策）
+  //
+  // 4GB を超えるファイルは先頭の一部しか読めない（src/bigfile.js）。
+  // そのとき、ビットレートの違いで**読める秒数がファイルごとに
+  // 大きく変わる**。実素材では mov が 603秒、mp4 が 1530秒 になった。
+  //
+  // 長さの違う波形を突き合わせると、全域探索が誤った位置を返す
+  // （実測: 正解 2.19秒 に対して 398秒 を返した。2026-09-20）。
+  //
+  // **抜いたあとに切りそろえても直らない。** 抜く時点で
+  // ffmpeg に -t で同じ秒数を渡す必要がある。そうすれば
+  // 正しく 2.20秒 が出る（実測で確認）。
+  //
+  // そこで2段構えにする:
+  //   1周目 … まず1本目を読んで、何秒ぶん取れるか見る
+  //   2周目 … その秒数で全部を抜き直す
+  // 小さいファイルばかりなら1周目で全部そろうので、やり直しは起きない。
+  // 4GB 超のファイルも WORKERFS でマウントして全長を読める
+  // （src/bigfile.js）。切りそろえは不要になった。
   const envs = [];
   for (let i = 0; i < order.length; i++) {
     const o = order[i];
     onProgress({ done: i, total: order.length * 2,
                  message: `${o.f.name} の音を読んでいます` });
     try {
-      const len = Math.min(SCAN_LEN_SEC, o.dur);   // 実質は全長
-      const pcm = await extractSyncPCM(o.f.file, 0, len);
+      const pcm = await extractSyncPCM(o.f.file, 0, Math.min(SCAN_LEN_SEC, o.dur));
       envs.push(pcm.length ? buildEnvelope(pcm, SYNC_RATE, ENV_RATE) : null);
     } catch (err) {
       envs.push(null);
@@ -186,8 +207,16 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180,
       if (!v.confident) continue;
 
       const offsetSec = rough.offsetSec + v.medianSec;
-      const overlap = Math.min(order[i].dur, offsetSec + order[j].dur)
-                    - Math.max(0, offsetSec);
+
+      // 重なりは**実際に手元にある波形の長さ**で測る。
+      //
+      // 4GB を超えるファイルは先頭の一部しか読めていない
+      // （src/bigfile.js）。メタデータ上の全長（105分）で計算すると、
+      // 実際には10分ぶんしか無いのに「長く重なっている」ことになり、
+      // 逆に足りないと誤判定する。
+      const aLen = a.length / ENV_RATE;
+      const bLen = b.length / ENV_RATE;
+      const overlap = Math.min(aLen, offsetSec + bLen) - Math.max(0, offsetSec);
       if (overlap < MIN_OVERLAP_SEC) continue;
 
       links.push({ i, j, offsetSec, overlap, score: v.meanScore,

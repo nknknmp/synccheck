@@ -18,6 +18,8 @@
  * （組ごとに測るので、つなぐ必要がそもそも無い）。
  */
 
+import { mountInput } from './bigfile.js';
+
 // CDN から直接読むと、ffmpeg が内部で立ち上げる worker が
 // 「別オリジンのスクリプトは Worker にできない」というブラウザの制限に
 // 引っかかる。そのため一式を vendor/ に置いて、同一オリジンから読む。
@@ -99,7 +101,9 @@ export async function extractSyncPCM(file, startSec = 0, durationSec = null) {
   const input = `in_${Date.now()}.${ext}`;
   const output = 'out.raw';
 
-  await ff.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+  // 4GB を超えるファイルはメモリに載らない（ffmpeg.wasm は 32bit）。
+  // 大きいものは WORKERFS でマウントしてコピーを避ける。src/bigfile.js。
+  const mounted = await mountInput(ff, file, input);
 
   try {
     const args = [];
@@ -111,7 +115,7 @@ export async function extractSyncPCM(file, startSec = 0, durationSec = null) {
 
     await ff.exec([
       ...args,
-      '-i', input,
+      '-i', mounted.path,
       '-vn',                        // 映像は読まない
       '-ac', '1',                   // モノラル
       '-ar', String(SYNC_RATE),     // 8kHz
@@ -125,7 +129,7 @@ export async function extractSyncPCM(file, startSec = 0, durationSec = null) {
       data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
     );
   } finally {
-    try { await ff.deleteFile(input); } catch { /* 消せなくても進む */ }
+    await mounted.cleanup();
   }
 }
 
@@ -150,14 +154,15 @@ export async function readMeta(file) {
   const collect = ({ message }) => lines.push(message);
   ff.on('log', collect);
 
-  await ff.writeFile(input, new Uint8Array(await file.arrayBuffer()));
+  // 大きいファイルはマウントして読む（src/bigfile.js）
+  const mounted = await mountInput(ff, file, input);
 
   try {
     // メタデータは -i を読んだ時点でログに出るので、変換は要らない。
     // -t 0 で「0秒だけ処理する」とし、映像のデコードを走らせない。
     // -f null - で全部デコードすると、2時間の動画で何十秒もかかる。
     try {
-      await ff.exec(['-i', input, '-t', '0', '-f', 'null', '-']);
+      await ff.exec(['-i', mounted.path, '-t', '0', '-f', 'null', '-']);
     } catch { /* 解析だけが目的なので失敗してよい */ }
 
     const text = lines.join('\n');
@@ -199,7 +204,7 @@ export async function readMeta(file) {
     return { duration, creationMs, hasAudio, fps, log: text };
   } finally {
     ff.off('log', collect);
-    try { await ff.deleteFile(input); } catch { /* 消せなくても進む */ }
+    await mounted.cleanup();
   }
 }
 
