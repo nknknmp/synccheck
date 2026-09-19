@@ -7,126 +7,95 @@
  * いちばん早く始まった1本を 00:00:00:00 とし、残りをそこからの
  * 位置で出す。2本でも6本でも同じ形で並ぶ。
  *
- * ■ A側/B側という分け方はしない
+ * ■ 1カメしかないシーンが混ざる
  *
- * 以前は「基準のカメラ」と「合わせるカメラ」を分けて組にしていたが、
- * 4本・6本と増えると組の数だけ結果が出てしまい、
- * 「結局どこに置くのか」が読み取れなかった。
+ * すべてのクリップにペアがあるとは限らない。2カメで撮った場面もあれば、
+ * 1カメだけの場面もある。**重ならないクリップがあるのは正常**なので、
+ * それを異常として扱わない。
  *
- * ■ 位置の決め方
+ * ■ 位置の決め方（撮影時刻は当てにしない）
  *
- * 撮影時刻は当てにしない。ファイルごとに意味が違うため
- * （実素材で mov=録画開始 / mp4=録画終了 になっていて、
- *  そのまま信じると 5.2秒ずれた。timeline.js のコメント参照）。
+ * 撮影時刻はファイルごとに意味が違う。実素材では
+ * iPad(mov)=録画開始 / Android(mp4)=録画終了 を記録していた。
+ * さらに秒単位までしか無く、端末の時計自体も数秒ずれる。
+ * 編集に要る精度は1フレーム(0.033秒)なので、原理的に届かない。
  *
- * かわりに**音で測る**。撮影時刻は「どのあたりを探すか」の
- * 目安にだけ使う。音量やマイク位置が違っても答えは変わらない
- * （正規化するため。test/volume_test.py で実証している）。
+ * そこで **音で重なりを確かめてから位置を決める**。
+ * 撮影時刻は「どのあたりを探すか」の当たりにだけ使う。
  *
- * ■ つなぎ方
+ * ■ 重なっているかの判定（ここが肝）
  *
- * 1本目を基準に、2本目以降を順に測って位置を確定していく。
- * 測る回数は「本数 - 1」で済む（総当たりはしない）。
- *
- * 直前に確定した1本と測るのではなく、**すでに確定した中で
- * いちばん重なりが長いもの**と測る。重なりが長いほど答えが安定し、
- * 誤差の積み上がりも減る。
+ * 相関スコアの大小では線を引けない。実素材で総当たりしたところ、
+ * 重なっていない組でも 0.23 は出て、重なっている組が 0.33 のことも
+ * あった。決め手は「その位置で窓ごとに測り直して、どの窓も同じ答えに
+ * なるか」。sync.js の verifyOverlap がそれをやる。
  */
 
-import { measurePair } from './measure.js';
+import { extractSyncPCM, SYNC_RATE, ENV_RATE } from './audio.js';
+import { buildEnvelope, findOffsetFullRange, verifyOverlap } from './sync.js';
 
-/** 測定に必要な最低限の重なり（これ未満は測らない） */
-export const MIN_OVERLAP_SEC = 10;
+/**
+ * 重なりを探すのに使う音声の長さ。
+ *
+ * ■ 全長を読む
+ *
+ * 途中で切ると、そこから先で重なっている組を見つけられない。
+ * 実素材で k1.mov(847秒) と k2.mp4 の重なりは **418秒目から**
+ * 始まっており、600秒で切ると照合はできても、切り詰めた側の
+ * 波形が足りずに窓の検算が通らなかった（2026-09-19）。
+ *
+ * 音声だけ・8kHz モノラルなので、1時間でも 28MB ほど。
+ * 映像は1フレームも読まない（-vn）ので、長さより本数が効く。
+ */
+const SCAN_LEN_SEC = Infinity;
+
+/** これ未満しか重ならない組は測らない */
+export const MIN_OVERLAP_SEC = 20;
 
 /**
  * 撮影時刻から、各ファイルのだいたいの開始位置を秒で見積もる。
  *
- * ここで出すのは「どのあたりを探すか」の当たりであって、
- * 答えではない。音で測って上書きする。
+ * ■ これは「当たり」であって答えではない
  *
- * ■ 撮影時刻が「録画開始」か「録画終了」か分からない
+ * 撮影時刻から位置を決めてはいけない。理由は3つあり、すべて実測済み:
  *
- * 実素材（916まとめ）で:
+ *   1. **録画開始か終了かがファイルごとに違う**
+ *      iPad(mov)  = 録画開始を記録（com.apple.quicktime.model=iPad）
+ *      Android(mp4) = 録画終了を記録（com.android.version=13）
+ *      実素材 916まとめ では差が 11分1秒 ＝ ほぼ動画の長さぶん出た。
  *
- *   mov: 08:32:36 / 661秒  ← 録画**開始**を記録
- *   mp4: 08:43:37 / 659秒  ← 録画**終了**を記録
+ *   2. **秒単位までしか記録されない**（ミリ秒は全部ゼロ）
  *
- * 同じ11分の場面を撮った2本なのに、記録している意味が違う。
- * どちらも「開始」だと思って並べると 11分1秒 ずれ、
- * 重なりが 0.3秒 しか無いことになって「重なっていない」と
- * 判定されてしまう（2026-09-19 の不具合）。
+ *   3. **端末の時計自体が数秒ずれる**
  *
- * そこで、時刻ごとに「開始かもしれない / 終了かもしれない」の
- * 2案を持ち、**全体の重なりがいちばん大きくなる組み合わせ**を選ぶ。
- * 2台のカメラは同じ時間帯を撮っているはず、という事実を使う。
- * （旧 timeline.js の resolveRecordingTimes と同じ考え方）
+ *   端末で決め打って解釈しても、音で測った答えとの差は
+ *   5.2秒（156フレーム）あった。編集に要る精度は1フレーム＝0.033秒
+ *   なので、撮影時刻では原理的に届かない。
+ *
+ * ■ 出典（これを消さないこと）
+ *
+ * この判断は SemiCut で実ファイル4本を ffprobe して確定させたもの。
+ * 送り方（USB / Quick Share / LocalSend）による更新日時の違いも含めて
+ *
+ *     C:\dev\toolbox\SemiCut\引継ぎノート.md
+ *     「素材の実測値（もう一度 ffprobe しなくていいように）」
+ *
+ * に表がある。2026-09-19 に端末の判別方法を追記した。
+ *
+ * **SemiCut から移植したとき、コードだけ来て この説明が来なかったため、
+ * 同じ調査を2回やる羽目になった。** 作り替えるときは必ず持っていくこと。
+ *
+ * ■ ここでやること
+ *
+ * 端末を決め打ちせず、撮影時刻をそのまま並べるだけ。
+ * 実際の位置は lineUp() が音で決める（総当たり＋窓の検算）ので、
+ * ここが多少ずれていても最終結果は合う。
  */
 export function guessStarts(files) {
   const withTime = files.filter((f) => f.creationMs);
-  if (withTime.length === 0) {
-    // 手がかりが無い。全部 0 から始まっていることにして音で測る。
-    return files.map(() => 0);
-  }
-
-  // 各ファイルの候補。[埋め込みが開始とみた場合, 終了とみた場合]
-  const cands = files.map((f) => {
-    if (!f.creationMs) return [0];
-    const durMs = (f.duration || 0) * 1000;
-    return [f.creationMs, f.creationMs - durMs];
-  });
-
-  const idx = files.map(() => 0);
-  const startMs = () => files.map((f, i) => cands[i][idx[i]]);
-
-  // 全組み合わせの重なりの合計。大きいほど「同じ時間帯を撮っている」
-  const totalOverlap = () => {
-    const st = startMs();
-    let sum = 0;
-    for (let i = 0; i < files.length; i++) {
-      for (let j = i + 1; j < files.length; j++) {
-        const ai = st[i], aj = st[j];
-        const di = (files[i].duration || 0) * 1000;
-        const dj = (files[j].duration || 0) * 1000;
-        sum += Math.max(0, Math.min(ai + di, aj + dj) - Math.max(ai, aj));
-      }
-    }
-    return sum;
-  };
-
-  // 1本ずつ案を切り替えてみて、重なりが増えるなら採用する。
-  // 変化が無くなるまで繰り返す（数本なので数回で収束する）。
-  for (let pass = 0; pass < 4; pass++) {
-    let changed = false;
-    for (let i = 0; i < files.length; i++) {
-      if (cands[i].length < 2) continue;
-      const before = totalOverlap();
-      idx[i] = 1 - idx[i];
-      if (totalOverlap() <= before) idx[i] = 1 - idx[i];
-      else changed = true;
-    }
-    if (!changed) break;
-  }
-
-  const st = startMs();
-  const base = Math.min(...st.filter((v, i) => files[i].creationMs));
-  return files.map((f, i) => (f.creationMs ? (st[i] - base) / 1000 : 0));
-}
-
-/**
- * 2本の重なりを、それぞれのファイル内の位置として返す。
- *
- * @returns {{overlapSec, aOffsetSec, bOffsetSec}|null}
- */
-function overlapOf(aStart, aDur, bStart, bDur) {
-  const start = Math.max(aStart, bStart);
-  const end = Math.min(aStart + aDur, bStart + bDur);
-  const overlap = end - start;
-  if (overlap <= 0) return null;
-  return {
-    overlapSec: overlap,
-    aOffsetSec: start - aStart,
-    bOffsetSec: start - bStart,
-  };
+  if (withTime.length === 0) return files.map(() => 0);
+  const base = Math.min(...withTime.map((f) => f.creationMs));
+  return files.map((f) => (f.creationMs ? (f.creationMs - base) / 1000 : 0));
 }
 
 /**
@@ -134,10 +103,7 @@ function overlapOf(aStart, aDur, bStart, bDur) {
  *
  * @param {Array} files  {name, file, duration, creationMs} の配列
  * @param {(p:object)=>void} onProgress
- * @param {number} maxLenSec  1回の測定で使う音声の長さ
  * @returns {{items:Array, notes:Array}}
- *   items: {name, file, startSec, duration, measured, score, warn} の配列
- *          startSec はいちばん早いものを 0 とした秒
  */
 export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
   if (files.length === 0) return { items: [], notes: [] };
@@ -145,7 +111,7 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
   const notes = [];
   const guess = guessStarts(files);
 
-  // 推定開始が早い順に並べる。これが測る順番になる。
+  // 撮影時刻の順に並べる（当たりとして使うだけ）
   const order = files
     .map((f, i) => ({ f, guessStart: guess[i], dur: f.duration || 0 }))
     .sort((x, y) => x.guessStart - y.guessStart);
@@ -161,125 +127,190 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
     };
   }
 
-  // 先頭を仮の基準にする（あとで最小値を引いて 0 起点に直す）
-  // 1本目は測る対象ではなく、測定の土台。
-  // measured:false と同じ扱いにすると「撮影時刻のまま＝疑わしい」と
-  // 読めてしまうので、基準であることを別の印で持つ。
-  const placed = [{
-    name: order[0].f.name, file: order[0].f.file,
-    startSec: 0, duration: order[0].dur,
-    measured: false, isBase: true, score: null, warn: null,
-    _ref: order[0],
-  }];
-
-  const total = order.length - 1;
-  for (let i = 1; i < order.length; i++) {
-    const cur = order[i];
-    onProgress({ done: i - 1, total, message: `${cur.f.name} の位置を測っています` });
-
-    // すでに置いたもののうち、いちばん重なりが長いものを相手に選ぶ。
-    // 重なりが長いほど答えが安定する。
-    let best = null;
-    for (const p of placed) {
-      const gap = cur.guessStart - p._ref.guessStart;   // 推定のズレ
-      const ov = overlapOf(p.startSec, p.duration,
-                           p.startSec + gap, cur.dur);
-      if (!ov) continue;
-      if (!best || ov.overlapSec > best.ov.overlapSec) best = { p, ov, gap };
-    }
-
-    if (!best || best.ov.overlapSec < MIN_OVERLAP_SEC) {
-      // どれとも重なっていない。撮影時刻の見積もりだけで置く。
-      const fallbackStart = placed[0].startSec
-        + (cur.guessStart - placed[0]._ref.guessStart);
-      placed.push({
-        name: cur.f.name, file: cur.f.file,
-        startSec: fallbackStart, duration: cur.dur,
-        measured: false, score: null,
-        warn: '他と重なっていないので撮影時刻のまま置いています',
-        _ref: cur,
-      });
-      notes.push(`${cur.f.name} は他と重なりが足りず、音で測れませんでした`);
-      continue;
-    }
-
-    // 音で測る。measurePair は「b の遅れ」を返す。
-    // startSec も渡す。measurePair はこれで timeGapSec を出しており、
-    // 渡さないと NaN になる（lineup では measuredSec しか使わないので
-    // 表には出ていなかったが、壊れた値を返すのは良くない）。
-    const pair = {
-      a: {
-        ...best.p._ref.f, name: best.p.name, file: best.p.file,
-        startSec: best.p.startSec,
-      },
-      b: { ...cur.f, startSec: best.p.startSec + best.gap },
-      overlapSec: best.ov.overlapSec,
-      aOffsetSec: best.ov.aOffsetSec,
-      bOffsetSec: best.ov.bOffsetSec,
-    };
-
-    let r;
+  // ■ 1. 各ファイルの音を1回だけ読む
+  //
+  // 総当たりで測るので、毎回抜き直すと本数の2乗で時間がかかる。
+  // 先に全部の波形を作っておく。
+  const envs = [];
+  for (let i = 0; i < order.length; i++) {
+    const o = order[i];
+    onProgress({ done: i, total: order.length * 2,
+                 message: `${o.f.name} の音を読んでいます` });
     try {
-      r = await measurePair(pair, (m) => onProgress({ done: i - 1, total, message: m }),
-                            maxLenSec);
+      const len = Math.min(SCAN_LEN_SEC, o.dur);   // 実質は全長
+      const pcm = await extractSyncPCM(o.f.file, 0, len);
+      envs.push(pcm.length ? buildEnvelope(pcm, SYNC_RATE, ENV_RATE) : null);
     } catch (err) {
-      r = { ok: false, reason: err.message };
-    }
-
-    if (!r.ok) {
-      const fallbackStart = best.p.startSec + best.gap;
-      placed.push({
-        name: cur.f.name, file: cur.f.file,
-        startSec: fallbackStart, duration: cur.dur,
-        measured: false, score: null,
-        warn: `測れなかったので撮影時刻のまま（${r.reason}）`,
-        _ref: cur,
-      });
-      notes.push(`${cur.f.name}: ${r.reason}`);
-      continue;
-    }
-
-    // このファイルの位置 = 相手の位置 + 推定のズレ + 音で測った補正
-    //
-    // best.gap は撮影時刻から見た推定のズレ。そこを起点に
-    // aOffsetSec/bOffsetSec で切り出して測っているので、
-    // measuredSec（音で測った差）を足せば正しい位置になる。
-    // r.totalOffsetSec は timeGapSec を含む別の基準なので使わない。
-
-    placed.push({
-      name: cur.f.name, file: cur.f.file,
-      startSec: best.p.startSec + best.gap + r.measuredSec,
-      duration: cur.dur,
-      measured: true,
-      score: r.score,
-      // 何がどう効いてこの位置になったかを残す。
-      // ずれたときに、撮影時刻の推定が悪いのか音の測定が悪いのかを
-      // 画面で切り分けられるようにするため。
-      detail: {
-        against: best.p.name,          // 誰と測ったか
-        guessGapSec: best.gap,         // 撮影時刻から見た差
-        measuredSec: r.measuredSec,    // 音で測った補正
-        overlapSec: best.ov.overlapSec,
-        windows: r.points ? r.points.map((x) => x.offsetSec) : [],
-        maxDeviationSec: r.maxDeviationSec,
-      },
-      warn: r.lowConfidence
-        ? '窓の過半数が一致しなかった。この位置は信用しないこと'
-        : (r.drift ? '区間ごとにズレが変わっている' : null),
-      _ref: cur,
-    });
-
-    if (r.lowConfidence) {
-      notes.push(`${cur.f.name} は測定が安定しませんでした（スコア ${r.score.toFixed(3)}）`);
+      envs.push(null);
+      notes.push(`${o.f.name}: 音を読めませんでした（${err.message}）`);
     }
   }
 
-  // いちばん早いものを 0 にそろえる
-  const min = Math.min(...placed.map((p) => p.startSec));
-  const items = placed
-    .map(({ _ref, ...p }) => ({ ...p, startSec: p.startSec - min }))
-    .sort((a, b) => a.startSec - b.startSec);
+  // ■ 2. 総当たりで「本当に重なっている組」を探す
+  //
+  // 撮影時刻を信じないので全部の組を見る。6本なら15組だが、
+  // 波形はもう手元にあるので計算だけ。音を読み直すことはない。
+  const links = [];
+  let step = 0;
+  const pairCount = order.length * (order.length - 1) / 2;
+  for (let i = 0; i < order.length; i++) {
+    for (let j = i + 1; j < order.length; j++) {
+      step++;
+      onProgress({ done: order.length + (step / pairCount) * order.length,
+                   total: order.length * 2,
+                   message: `${order[i].f.name} と ${order[j].f.name} を照合中` });
+      const a = envs[i], b = envs[j];
+      if (!a || !b) continue;
 
-  onProgress({ done: total, total, message: '並べ終わりました' });
+      // 全域から候補を探し、その位置で窓ごとに検算する
+      const rough = findOffsetFullRange(a, b, ENV_RATE);
+      const lagFrames = Math.round(rough.offsetSec * ENV_RATE);
+      const v = verifyOverlap(a, b, ENV_RATE, lagFrames);
+      if (!v.confident) continue;
+
+      const offsetSec = rough.offsetSec + v.medianSec;
+      const overlap = Math.min(order[i].dur, offsetSec + order[j].dur)
+                    - Math.max(0, offsetSec);
+      if (overlap < MIN_OVERLAP_SEC) continue;
+
+      links.push({ i, j, offsetSec, overlap, score: v.meanScore,
+                   windows: v.windows, agree: v.agree });
+    }
+  }
+
+  // ■ 3. 確かな組から順につないで位置を決める
+  //
+  // 重なりが長い組ほど答えが安定するので、そこから確定させる。
+  //
+  // ■ 島がいくつもできる
+  //
+  // 1カメしかない場面が混ざるので、全部が1つにつながるとは限らない。
+  // 実素材では「実技1のグループ」と「実技3のグループ」が別々の島に
+  // なった。島ごとに起点を作り、あとで時間順に並べる。
+  // （2026-09-19: ここで2つ目の島を捨てていて、実技3のペアが
+  //   「重ならない」と出ていた）
+  links.sort((x, y) => y.overlap - x.overlap);
+
+  const pos = new Array(order.length).fill(null);
+  const detail = new Array(order.length).fill(null);
+  const island = new Array(order.length).fill(-1);   // どの島に属すか
+  let islandCount = 0;
+
+  for (const L of links) {
+    const hasI = pos[L.i] != null, hasJ = pos[L.j] != null;
+
+    if (!hasI && !hasJ) {
+      // 新しい島の起点。島の中では 0 から始める（あとで足しこむ）。
+      pos[L.i] = 0;
+      island[L.i] = islandCount++;
+      pos[L.j] = L.offsetSec;
+      island[L.j] = island[L.i];
+      detail[L.j] = { against: order[L.i].f.name, offsetSec: L.offsetSec,
+                      overlapSec: L.overlap, score: L.score,
+                      windows: L.windows, agree: L.agree };
+      continue;
+    }
+
+    if (hasI && hasJ) {
+      // 両方とも確定済み。別々の島なら、この組でつなげる。
+      if (island[L.i] !== island[L.j]) {
+        const from = island[L.j], to = island[L.i];
+        const shift = (pos[L.i] + L.offsetSec) - pos[L.j];
+        for (let k = 0; k < order.length; k++) {
+          if (island[k] === from) { pos[k] += shift; island[k] = to; }
+        }
+      }
+      continue;
+    }
+
+    if (hasI) {
+      pos[L.j] = pos[L.i] + L.offsetSec;
+      island[L.j] = island[L.i];
+      detail[L.j] = { against: order[L.i].f.name, offsetSec: L.offsetSec,
+                      overlapSec: L.overlap, score: L.score,
+                      windows: L.windows, agree: L.agree };
+    } else {
+      pos[L.i] = pos[L.j] - L.offsetSec;
+      island[L.i] = island[L.j];
+      detail[L.i] = { against: order[L.j].f.name, offsetSec: -L.offsetSec,
+                      overlapSec: L.overlap, score: L.score,
+                      windows: L.windows, agree: L.agree };
+    }
+  }
+
+  // ■ 島どうしを時間順に並べる
+  //
+  // 島の中の位置は音で確かめてあるが、島と島の前後は分からない。
+  // 撮影時刻の順（order の順）で、重ならないよう後ろへ積む。
+  const ISLAND_GAP_SEC = 2;
+  const islandIds = [...new Set(island.filter((v) => v >= 0))];
+  if (islandIds.length > 1) {
+    // 各島の代表（order の中でいちばん前にあるもの）で順番を決める
+    const firstIdx = new Map();
+    for (let k = 0; k < order.length; k++) {
+      if (island[k] >= 0 && !firstIdx.has(island[k])) firstIdx.set(island[k], k);
+    }
+    const sortedIslands = [...firstIdx.entries()]
+      .sort((a, b) => a[1] - b[1]).map(([id]) => id);
+
+    let base = 0;
+    for (const id of sortedIslands) {
+      const members = [];
+      for (let k = 0; k < order.length; k++) if (island[k] === id) members.push(k);
+      const lo = Math.min(...members.map((k) => pos[k]));
+      const shift = base - lo;
+      for (const k of members) pos[k] += shift;
+      const hi = Math.max(...members.map((k) => pos[k] + order[k].dur));
+      base = hi + ISLAND_GAP_SEC;
+    }
+    notes.push(
+      `重なりの組が ${islandIds.length}つ に分かれています`
+      + `（別々の場面を撮ったもの）。場面どうしの前後は撮影時刻の順です`);
+  }
+
+  // ■ 4. どの組にも入らなかったもの（1カメのシーンなど）
+  //
+  // 音で位置を決められないので、撮影時刻の順に後ろへ並べる。
+  // 確定済みの最後尾より後ろに、重ならないよう間隔を空けて置く。
+  // 撮影時刻のずれをそのまま持ち込むと大きく外れるため、
+  // 「順番だけは合っている」状態にとどめる。
+  const GAP_SEC = 2;
+  let tail = 0;
+  for (let i = 0; i < order.length; i++) {
+    if (pos[i] != null) tail = Math.max(tail, pos[i] + order[i].dur);
+  }
+  const lonely = [];
+  for (let i = 0; i < order.length; i++) {
+    if (pos[i] == null) lonely.push(i);
+  }
+  for (const i of lonely) {
+    tail += GAP_SEC;
+    pos[i] = tail;
+    tail += order[i].dur;
+  }
+  if (lonely.length) {
+    notes.push(
+      `${lonely.map((i) => order[i].f.name).join('、')} は`
+      + `他と重なりませんでした（1カメだけの場面など）。`
+      + `撮影時刻の順に後ろへ並べています`);
+  }
+
+  // ■ 5. いちばん早いものを 0 にそろえる
+  const min = Math.min(...pos);
+  const items = order.map((o, i) => ({
+    name: o.f.name,
+    file: o.f.file,
+    startSec: pos[i] - min,
+    duration: o.dur,
+    measured: detail[i] != null,
+    isBase: detail[i] == null && pos[i] - min === 0,
+    alone: detail[i] == null && !(pos[i] - min === 0),
+    score: detail[i] ? detail[i].score : null,
+    warn: null,
+    detail: detail[i],
+  })).sort((a, b) => a.startSec - b.startSec);
+
+  onProgress({ done: order.length * 2, total: order.length * 2,
+               message: '並べ終わりました' });
   return { items, notes };
 }

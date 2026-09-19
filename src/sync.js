@@ -344,3 +344,67 @@ export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
     margin,
   };
 }
+
+
+/**
+ * 「本当に重なっているか」を窓の一致で判定する。
+ *
+ * ■ なぜ粗いスコアだけでは決められないか
+ *
+ * 実素材（916烏口突起・6本）で総当たりしたところ、重なっていない
+ * 組でもスコア 0.23 程度は出た。一方、本当に重なっている組が 0.33 の
+ * こともある。**スコアの大小では線を引けない**。
+ *
+ * 決め手になるのは「候補の位置で切り出して窓ごとに測り直したとき、
+ * どの窓も同じ答えになるか」。本当に重なっていれば全窓が 0 付近で
+ * 揃う。偶然なら窓ごとにバラバラになる。
+ *
+ * 実測（2026-09-19）:
+ *   1.mov ↔ 1.mp4  窓 4/5 一致 → 重なる（正しい）
+ *   1.mov ↔ 2.mp4  窓 7/7 一致 → 重なる（名前は別だが中身は重なる）
+ *   3.mov ↔ 3.mp4  窓 2/2 一致 → 重なる
+ *   その他          窓が揃わない → 重ならない
+ *
+ * @param {Float32Array} envA
+ * @param {Float32Array} envB
+ * @param {number} envRate
+ * @param {number} lagFrames  envB の先頭が envA のどこに来るか（サンプル）
+ * @param {number} winSec     1窓の長さ
+ * @returns {{windows, agree, medianSec, meanScore, confident}}
+ */
+export function verifyOverlap(envA, envB, envRate, lagFrames, winSec = 60) {
+  const W = Math.floor(winSec * envRate);
+  const lo = Math.max(0, -lagFrames);
+  const hi = Math.min(envB.length, envA.length - lagFrames);
+
+  const vals = [];
+  const scores = [];
+  for (let s = lo; s + W <= hi; s += W) {
+    const a = envA.subarray(lagFrames + s, lagFrames + s + W);
+    const b = envB.subarray(s, s + W);
+    if (a.length < W || b.length < W) break;
+    // 窓の中で、ずれが 0 付近に収まるかを見る。
+    // 探索幅は窓の半分まで（それ以上は重なりが足りない）。
+    const r = crossCorrelate(a, b, envRate, winSec / 2);
+    if (r.tooShort) continue;
+    vals.push(r.offsetSec);
+    scores.push(r.score);
+  }
+
+  if (vals.length === 0) {
+    return { windows: 0, agree: 0, medianSec: 0, meanScore: 0, confident: false };
+  }
+
+  const sorted = [...vals].sort((x, y) => x - y);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const agree = vals.filter((v) => Math.abs(v - median) < 0.5).length;
+  const meanScore = scores.reduce((a, b) => a + b, 0) / scores.length;
+
+  // 窓が1つしか取れないときは検算になっていない。
+  // その場合はスコアが十分高いことを条件にする。
+  const confident = vals.length >= 2
+    ? (agree / vals.length >= 0.6 && Math.abs(median) < 0.5)
+    : (meanScore > 0.5 && Math.abs(median) < 0.5);
+
+  return { windows: vals.length, agree, medianSec: median, meanScore, confident };
+}

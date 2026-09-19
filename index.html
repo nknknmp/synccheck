@@ -217,7 +217,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
-      <span class="ver" id="ver" title="いま動いている版">v9</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v10</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -542,30 +542,29 @@ function showLineup(line) {
     const warn = it.warn ? `<div class="rowwarn">${it.warn}</div>` : '';
     // 基準／音で測った／測れず撮影時刻のまま、の3つを区別する。
     // 基準を「撮影時刻」と出すと疑わしく見えてしまうため。
+    // 基準 / 音で測った / 他と重ならなかった の3つを区別する。
+    // 1カメだけの場面は「重ならない」のが正常なので、
+    // 異常のように見せない（黄色にはするが警告文は出さない）。
     const how = it.isBase
       ? '<span class="how base">基準</span>'
       : (it.measured
         ? `<span class="how" title="相関スコア ${it.score.toFixed(3)}">音で測定</span>`
-        : '<span class="how dim2">撮影時刻のまま</span>');
+        : '<span class="how dim2" title="他と重ならなかった'
+          + '（1カメだけの場面など）">単独</span>');
     // 診断: ずれたときに原因を切り分けられるよう、内訳を出す。
-    // 「撮影時刻の推定」と「音で測った補正」のどちらが効いたかが分かる。
+    // どの相手とどれだけ重なり、窓がいくつ一致したかが分かる。
     let diag = '';
     if (it.detail) {
       const d = it.detail;
-      const w = d.windows.length
-        ? d.windows.map((x) => x.toFixed(2)).join(' / ') : '—';
       diag =
         `<details class="diag"><summary>内訳</summary>`
-        + `<div>基準にした相手: ${d.against}</div>`
-        + `<div>撮影時刻から見た差: ${d.guessGapSec.toFixed(2)}秒</div>`
-        + `<div>音で測った補正: ${d.measuredSec.toFixed(2)}秒</div>`
-        + `<div>= 置き位置 ${it.startSec.toFixed(2)}秒</div>`
-        + `<div>重なり: ${d.overlapSec.toFixed(0)}秒 / `
-        + `相関スコア: ${it.score.toFixed(3)}</div>`
-        + `<div>窓ごとの測定値: ${w}`
-        + (d.maxDeviationSec != null
-          ? `（ばらつき ${d.maxDeviationSec.toFixed(2)}秒）` : '')
-        + `</div></details>`;
+        + `<div>合わせた相手: ${d.against}</div>`
+        + `<div>その相手からのズレ: ${d.offsetSec.toFixed(2)}秒</div>`
+        + `<div>重なり: ${d.overlapSec.toFixed(0)}秒</div>`
+        + `<div>窓の一致: ${d.agree}/${d.windows}`
+        + `（全部そろっているほど確か）</div>`
+        + `<div>相関スコア: ${d.score.toFixed(3)}</div>`
+        + `</details>`;
     }
     rows +=
       `<div class="prow">`
