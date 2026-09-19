@@ -53,17 +53,54 @@ SyncCheck は撮影時刻から「どの組が重なっているか」を自動�
 ※ index.html をダブルクリックしても動かない。
    file:// ではブラウザが import 文を拒否するため。
 
-【ネット越しに使う（iPad など）】
+【iPad で使う（同じ Wi-Fi から）】
 
-GitHub Pages に置けば URL を開くだけで使える。
-動画はブラウザの中で処理されるので、置いた先に動画は送られない。
+PC でサーバーを立てて、iPad の Safari からそれを開く。
 
-  1. GitHub で Settings → Pages → Source を main / (root) にする
-  2. https://nknknmp.github.io/dev-toolbox/SyncCheck/ を開く
+  1. PC と iPad を**同じ Wi-Fi** に繋ぐ
+     （PC が有線でも、同じルーターにぶら下がっていればよい）
 
-※ vendor/（ffmpeg.wasm 約31MB）がリポジトリに入っている必要がある。
-   このアプリでは Git に入れてある（SemiCut は除外している）。
-   初回だけ 31MB のダウンロードが走る。2回目からはキャッシュされる。
+  2. PC で:
+
+         cd C:\dev\toolbox\SyncCheck
+         python serve.py --lan
+
+     `--lan` を付けたときだけ外から見えるようになる。
+     付けないと今までどおりこのPCからしか開けない。
+
+  3. 初回は Windows の警告が出る。
+     **「プライベート ネットワーク」にチェックを入れて「アクセスを許可」**。
+     （パブリックは外さなくてよい）
+
+  4. 画面に出た `iPad : http://192.168.x.x:8770/` を
+     iPad の Safari に打ち込む。
+
+  5. 終わったら PC のウィンドウで Ctrl+C。付けっぱなしにしない。
+
+※ IP アドレスはルーターが配る番号なので、日が変わると変わることがある。
+   毎回 `--lan` の起動時に表示されるので、そこを見る。
+
+※ 開けないとき
+   - PC と iPad が別の Wi-Fi（2.4GHz / 5GHz の別 SSID）になっていないか
+   - ルーターの「プライバシーセパレータ」が ON だと端末同士が繋がらない
+   - 3 の警告を「キャンセル」してしまった場合は、Windows の
+     「セキュリティが強化された Windows ファイアウォール」→ 受信の規則 から
+     python の規則を消して、もう一度 `--lan` で起動し直す
+
+※ 初回だけ ffmpeg.wasm 約31MB のダウンロードが走る（LAN 内なのですぐ終わる）。
+   2回目からはキャッシュされる。
+
+
+【GitHub Pages に置く案について】
+
+置けば URL だけで使えるが、**今は使えない**。
+`dev-toolbox` リポジトリが private で、private リポジトリの Pages は
+有料プランでないと使えないため。public にすると toolbox 全体が
+公開されるので、そのためだけに切り替えない。
+
+どうしても外から使いたくなったら、SyncCheck だけを別の public
+リポジトリに切り出す。vendor/（ffmpeg.wasm）は Git に入っているので
+そのまま動く。
 
 
 【測る手順】

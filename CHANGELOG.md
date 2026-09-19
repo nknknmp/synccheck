@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-09-19
+
+iPad から実機確認できるよう、`serve.py` に `--lan` を足した。
+
+### 何を変えたか
+
+- `python serve.py --lan` で `0.0.0.0` を待ち受けるようにした。
+  起動時に iPad から打つ URL（`http://192.168.x.x:8770/`）を表示する。
+- IP は UDP ソケットの「繋いだふり」で OS に聞く（`lan_ip()`）。
+  `ipconfig` を読むと Hyper-V の仮想スイッチ（192.168.80.1）を
+  拾ってしまい、iPad からは繋がらない番号を案内することになる。
+- `使い方.txt` の「ネット越しに使う」を書き直した。
+
+### なぜそうしたか
+
+既定は `127.0.0.1` のままにした。このサーバーは SyncCheck フォルダの
+中身をそのまま返すので、必要なときだけ外に出す。
+
+GitHub Pages 案は今は使えないと分かったので、その旨を `使い方.txt` に
+残した。`dev-toolbox` が private で、private の Pages は有料プランが要る。
+toolbox 全体を public にはできないため。
+
+### 確認したこと
+
+- `--lan` で起動し、`http://192.168.0.3:8770/` から
+  index.html / `vendor/core/ffmpeg-core.wasm`（32MB, application/wasm）/
+  `src/audio.js`（text/javascript）がすべて HTTP 200 で返ることを確認。
+- **iPad の実機では未確認**（この作業時点で iPad を繋いでいない）。
+  ffmpeg は単スレッド版なので `SharedArrayBuffer` は要らず、
+  HTTPS でなくても Safari で動く見込み、というところまで。
+
+---
+
 ## 2026-09-17（新規作成）
 
 2カメのズレを測るだけのウェブアプリを作った。SemiCut とは別のプログラム。

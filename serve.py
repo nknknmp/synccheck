@@ -11,6 +11,14 @@ ES モジュール（import 文）がブラウザに拒否される。
 中身は静的ファイルを返すだけで、動画を受け取る処理は**一切ない**。
 動画はブラウザの中だけで処理される。
 
+■ iPad など別の端末から開くとき
+
+    python serve.py --lan
+
+同じ Wi-Fi の中からだけ見えるようになる（0.0.0.0 で待ち受ける）。
+既定で付けていないのは、このサーバーが SyncCheck フォルダの中身を
+そのまま返すため。要らないときまで外に見せない。
+
 ■ ネットに公開するときは不要
 
 GitHub Pages などに置く場合、このファイルは使わない。
@@ -20,6 +28,7 @@ GitHub Pages などに置く場合、このファイルは使わない。
 import http.server
 import socketserver
 import webbrowser
+import socket
 import os
 import sys
 
@@ -71,6 +80,24 @@ Handler.extensions_map['.mjs'] = 'text/javascript'
 Handler.extensions_map['.js'] = 'text/javascript'
 
 
+def lan_ip():
+    """
+    この PC が LAN で名乗っている IPv4 を返す。
+
+    ルーター宛に UDP ソケットを「繋いだふり」をして、OS がどの
+    ネットワーク越しに出ていくつもりかを聞く。実際の通信は起きない。
+    Hyper-V の仮想スイッチ（192.168.80.x など）を拾わないための方法。
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(('8.8.8.8', 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
 def main():
     if not os.path.isdir(os.path.join(ROOT, 'vendor', 'core')):
         print('！ vendor/core が見つかりません。')
@@ -78,15 +105,27 @@ def main():
         print('  使い方.txt の「vendor が無いとき」を見てください。')
         print()
 
+    lan = '--lan' in sys.argv
+    host = '0.0.0.0' if lan else '127.0.0.1'
     url = f'http://localhost:{PORT}/'
     socketserver.TCPServer.allow_reuse_address = True
 
     try:
-        with socketserver.TCPServer(('127.0.0.1', PORT), Handler) as httpd:
+        with socketserver.TCPServer((host, PORT), Handler) as httpd:
             print('════════════════════════════════════════')
             print(' SyncCheck')
             print('════════════════════════════════════════')
-            print(f'  {url}')
+            print(f'  このPC : {url}')
+            if lan:
+                ip = lan_ip()
+                if ip:
+                    print(f'  iPad   : http://{ip}:{PORT}/')
+                else:
+                    print('  iPad   : IP を特定できませんでした。')
+                    print('           ipconfig で Wi-Fi の IPv4 を見てください。')
+                print()
+                print('  ※ 同じ Wi-Fi に繋がっている端末から見えます。')
+                print('     初回は Windows の警告が出るので「プライベート」を許可。')
             print()
             print('  終わるときは Ctrl+C')
             print()
