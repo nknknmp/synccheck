@@ -100,17 +100,20 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
       items: [{
         name: order[0].f.name, file: order[0].f.file,
         startSec: 0, duration: order[0].dur,
-        measured: false, score: null, warn: null,
+        measured: false, isBase: true, score: null, warn: null,
       }],
       notes: ['1本しかないので測っていません'],
     };
   }
 
   // 先頭を仮の基準にする（あとで最小値を引いて 0 起点に直す）
+  // 1本目は測る対象ではなく、測定の土台。
+  // measured:false と同じ扱いにすると「撮影時刻のまま＝疑わしい」と
+  // 読めてしまうので、基準であることを別の印で持つ。
   const placed = [{
     name: order[0].f.name, file: order[0].f.file,
     startSec: 0, duration: order[0].dur,
-    measured: false, score: null, warn: null,
+    measured: false, isBase: true, score: null, warn: null,
     _ref: order[0],
   }];
 

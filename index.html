@@ -189,6 +189,7 @@
   .how { font-size: 11px; color: var(--ok); border: 1px solid var(--line);
          border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
   .how.dim2 { color: var(--warn); }
+  .how.base { color: var(--dim); }
   .rowwarn { display: block; font-size: 11px; color: var(--warn);
              margin-top: 2px; white-space: normal; }
   /* 1本だけ広い画面でないと窮屈なので、狭いときは縦に積む */
@@ -212,7 +213,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
-      <span class="ver" id="ver" title="いま動いている版">v6</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v7</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -298,6 +299,25 @@ function log(msg) {
   const el = $('log');
   el.textContent += msg + '\n';
   el.scrollTop = el.scrollHeight;
+}
+
+/**
+ * 進捗バーを動かす。0〜1 で指定する。
+ *
+ * ■ 2026-09-19: 作り替えのときにこの関数ごと消してしまい、
+ * ボタンを押しても「setBar is not defined」で最初の一歩で
+ * 止まっていた。ログも進捗も出ないので、利用者からは
+ * 「押しても何も起きない」としか見えなかった。
+ */
+function setBar(ratio) {
+  const el = $('bar').querySelector('i');
+  if (el) el.style.width = `${Math.max(0, Math.min(1, ratio)) * 100}%`;
+}
+
+/** 失敗したことを結果欄に出す。 */
+function showError(msg) {
+  $('results').innerHTML =
+    `<div class="pair bad"><div class="expl">${msg}</div></div>`;
 }
 
 $('showlog').onchange = (e) => $('log').classList.toggle('on', e.target.checked);
@@ -516,9 +536,13 @@ function showLineup(line) {
     const fr = toFrames(it.startSec, fps);
     const tc = framesToTimecode(fr, fps);
     const warn = it.warn ? `<div class="rowwarn">${it.warn}</div>` : '';
-    const how = it.measured
-      ? `<span class="how" title="相関スコア ${it.score.toFixed(3)}">音で測定</span>`
-      : '<span class="how dim2">撮影時刻</span>';
+    // 基準／音で測った／測れず撮影時刻のまま、の3つを区別する。
+    // 基準を「撮影時刻」と出すと疑わしく見えてしまうため。
+    const how = it.isBase
+      ? '<span class="how base">基準</span>'
+      : (it.measured
+        ? `<span class="how" title="相関スコア ${it.score.toFixed(3)}">音で測定</span>`
+        : '<span class="how dim2">撮影時刻のまま</span>');
     rows +=
       `<div class="prow">`
       + `<span class="pn" title="${it.name}">${it.name}${warn}</span>`

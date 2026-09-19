@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><title>通し確認</title>
+<!--
+  画面を通して動くかを確かめる（ブラウザで開く）
+
+  2026-09-19: 作り替えのときに setBar() を消してしまい、
+  ボタンを押しても最初の一歩で止まっていた。ログも進捗も出ないため
+  「押しても何も起きない」としか見えなかった。
+  Python のテストは全部通っていたので気づけなかった。
+
+  このページは iframe で本体を開き、実ファイルを input に流し込んで
+  ボタンを押す。利用者と同じ経路を通るので、こういう抜けを拾える。
+
+  使い方: python serve.py してから
+          http://localhost:8770/test/e2e_check.html を開く
+--></head><body>
+<pre id="out">...</pre>
+<iframe id="fr" src="/" style="width:1000px;height:700px"></iframe>
+<script>
+const L=[]; const say=s=>{L.push(String(s));document.getElementById('out').textContent=L.join('\n');
+  fetch('/__test_result',{method:'POST',body:L.join('\n')}).catch(()=>{});};
+const fr=document.getElementById('fr');
+fr.onload=async ()=>{
+  const w=fr.contentWindow, d=fr.contentDocument;
+  w.onerror=(m,s,l)=>say('ERROR: '+m+' @'+l);
+  w.addEventListener('unhandledrejection',e=>say('REJECT: '+(e.reason&&e.reason.message||e.reason)));
+  await new Promise(r=>setTimeout(r,1000));
+
+  // 実ファイルを2つ、input に流し込む（ユーザーの操作と同じ経路）
+  const names=['A_noise.mp4','B_noise.mp4'];
+  const dt=new DataTransfer();
+  for(const n of names){
+    const b=await (await fetch('/test/fixtures/'+n)).blob();
+    dt.items.add(new File([b], n, {type:'video/mp4'}));
+  }
+  const inp=d.getElementById('file');
+  inp.files=dt.files;
+  inp.dispatchEvent(new Event('change'));
+  await new Promise(r=>setTimeout(r,2500));
+  say('一覧に入った数: ' + d.querySelectorAll('#list li').length);
+
+  const run=d.getElementById('run');
+  say('ボタン disabled: ' + run.disabled);
+  if(run.disabled){ say('RESULT: FAIL ボタンが押せない'); return; }
+
+  say('--- 押します ---');
+  run.click();
+  // ffmpeg の読み込みがあるので長めに待つ
+  for(let i=0;i<40;i++){
+    await new Promise(r=>setTimeout(r,2000));
+    const rows=d.querySelectorAll('#results .prow');
+    if(rows.length){ break; }
+  }
+  const rows=[...d.querySelectorAll('#results .prow')];
+  say('結果の行数: ' + rows.length);
+  rows.forEach(r=>say('  ' + r.textContent.replace(/\s+/g,' ').trim()));
+  const lg=d.getElementById('log').textContent.trim();
+  say('ログ末尾: ' + lg.split('\n').slice(-3).join(' / '));
+  say(rows.length>=2 ? 'RESULT: PASS' : 'RESULT: FAIL 結果が出ない');
+};
+</script></body></html>

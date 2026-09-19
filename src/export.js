@@ -558,7 +558,8 @@ export function buildLineupText(line, fps = 30) {
     const fr = toFrames(it.startSec, fps);
     L.push(`  ${it.name.padEnd(w)}   ${framesToTimecode(fr, fps)}`
            + `   ${String(fr).padStart(7)} フレーム`
-           + `${it.measured ? '' : '   ※撮影時刻のまま'}`);
+           + `${it.isBase ? '   ←基準'
+                : (it.measured ? '' : '   ※撮影時刻のまま')}`);
     if (it.warn) L.push(`  ${' '.repeat(w)}   ★ ${it.warn}`);
   }
 
@@ -592,7 +593,7 @@ export function buildLineupCSV(line, fps = 30) {
     rows.push([
       it.name, framesToTimecode(fr, fps), String(fr),
       it.startSec.toFixed(3), (it.duration || 0).toFixed(1),
-      it.measured ? '音で測定' : '撮影時刻',
+      it.isBase ? '基準' : (it.measured ? '音で測定' : '撮影時刻のまま'),
       it.score != null ? it.score.toFixed(4) : '',
       it.warn || '',
     ]);
