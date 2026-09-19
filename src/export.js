@@ -603,3 +603,173 @@ export function buildLineupCSV(line, fps = 30) {
     return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }).join(',')).join('\n');
 }
+
+
+/**
+ * 並べた結果を fcpxml にする。
+ *
+ * ■ 画面に出した位置をそのまま書く
+ *
+ * 画面の「置く位置」と同じフレームに置く。編集ソフトで開いたときに
+ * 画面の数字と食い違わないことが大事なので、ここで位置を計算し直さない。
+ *
+ * ■ レーンの決め方（空のトラックを作らない）
+ *
+ * 同時に映っているクリップだけを重ねる。時間が重ならないクリップは
+ * **同じレーンに並べる**。素材の本数ぶんトラックを作ると、
+ * ほとんど空のトラックが何本もできて編集しづらい。
+ *
+ *   レーン0（主）: 時間が重ならない限り、次々に詰めていく
+ *   レーン1以上  : 主と同時に映っているものだけ
+ *
+ * 実素材6本では 2レーンに収まる（1カメだけの場面は主に入る）。
+ *
+ * ■ 位置が負にならないこと
+ *
+ * lineUp() はいちばん早いものを 0 にそろえているので、
+ * ここに来る時点で全部 0 以上。負だと編集ソフトが読めない。
+ */
+export function buildLineupFCPXML(line, options = {}) {
+  const {
+    fps = 30,
+    width = 1920,
+    height = 1080,
+    projectName = 'SyncCheck',
+  } = options;
+
+  const items = line.items || [];
+  if (items.length === 0) {
+    throw new Error('書き出すものがありません');
+  }
+
+  const nf = nearestFps(fps);
+  const { fd, tb, name: fpsName } = timebaseFor(nf);
+  const T = (sec) => toTime(sec, fd, tb);
+
+  // ■ レーンを割り当てる（空のトラックを作らない）
+  //
+  // クリップごとに「その時間に空いているレーン」へ入れる。
+  // 重ならないクリップは同じレーンを使い回すので、
+  // **同時に映る最大本数ぶんしかレーンができない**。
+  //
+  // 実素材6本では、同時に映るのは最大2本 → 2レーンで収まる。
+  // （素材の本数ぶんレーンを作ると、ほとんど空のトラックが並ぶ）
+  const sorted = [...items].sort((a, b) => a.startSec - b.startSec);
+  const laneEnd = [];             // 各レーンが空く時刻（秒）
+  const laneOf = new Map();       // クリップ名 → レーン番号
+
+  for (const it of sorted) {
+    const end = it.startSec + (it.duration || 0);
+    let lane = laneEnd.findIndex((e) => it.startSec >= e - 1e-6);
+    if (lane === -1) { lane = laneEnd.length; laneEnd.push(0); }
+    laneEnd[lane] = end;
+    laneOf.set(it, lane);
+  }
+
+  // ■ asset を作る
+  const assets = new Map();
+  for (const it of sorted) {
+    if (assets.has(it.name)) continue;
+    assets.set(it.name, {
+      id: `r${assets.size + 2}`,         // r1 は format
+      name: it.name,
+      duration: it.duration || 0,
+      // ブラウザは絶対パスを知らないので名前だけ書く。
+      // 編集ソフトで「見つからない」と言われたら素材を指定し直す。
+      src: `./${it.name}`,
+    });
+  }
+  const assetId = (name) => assets.get(name).id;
+
+  // ■ 本体を組む
+  //
+  // レーン0 のクリップを spine に並べ、レーン1以上は
+  // 「その時間に居るレーン0のクリップ」の子として重ねる。
+  // fcpxml は重ねるクリップを親の中に書く必要があるため。
+  //
+  // レーン0 に親が無い区間のクリップは、それ自身を spine に出す
+  // （どこにも入らず消えるのを防ぐ）。
+  const lane0 = sorted.filter((it) => laneOf.get(it) === 0);
+  const others = sorted.filter((it) => laneOf.get(it) !== 0);
+  const used = new Set();
+
+  const body = [];
+  for (const host of lane0) {
+    const hostDur = host.duration || 0;
+    const hostEnd = host.startSec + hostDur;
+
+    const kids = others.filter((o) => {
+      if (used.has(o)) return false;
+      const oEnd = o.startSec + (o.duration || 0);
+      return oEnd > host.startSec + 1e-6 && o.startSec < hostEnd - 1e-6;
+    });
+
+    const inner = kids.map((o) => {
+      used.add(o);
+      // 親より前には置けないので、はみ出す分は頭を削る
+      const cut = Math.max(0, host.startSec - o.startSec);
+      const placeAt = Math.max(host.startSec, o.startSec);
+      const visible = (o.duration || 0) - cut;
+      if (visible <= 0) return null;
+      return `                    <asset-clip lane="${laneOf.get(o)}"`
+        + ` ref="${assetId(o.name)}" name="${xmlEscape(o.name)}"`
+        + ` offset="${T(placeAt)}" start="${T(cut)}"`
+        + ` duration="${T(visible)}" audioRole="dialogue"/>`;
+    }).filter(Boolean);
+
+    body.push(
+      `                <asset-clip ref="${assetId(host.name)}"`
+      + ` name="${xmlEscape(host.name)}" offset="${T(host.startSec)}"`
+      + ` start="0s" duration="${T(hostDur)}" audioRole="dialogue">`,
+      ...inner,
+      `                </asset-clip>`
+    );
+  }
+
+  // どの親にも入らなかったものが無いことを確かめる。
+  //
+  // レーン0 は「いちばん早く空くレーン」なので、どのクリップも
+  // 必ずレーン0 のどれかと時間が重なるはず。もし漏れたら
+  // 黙って消えるより気づけたほうがよいので、ここで止める。
+  const orphan = others.filter((o) => !used.has(o));
+  if (orphan.length > 0) {
+    throw new Error(
+      `内部エラー: 置き場所が決まらないクリップがあります`
+      + `（${orphan.map((o) => o.name).join('、')}）`);
+  }
+
+  const assetLines = [...assets.values()].map((a) =>
+    `        <asset id="${a.id}" name="${xmlEscape(a.name)}"`
+    + ` start="0s" duration="${T(a.duration)}"`
+    + ` hasVideo="1" hasAudio="1" format="r1"`
+    + ` audioSources="1" audioChannels="2">\n`
+    + `            <media-rep kind="original-media" src="${xmlEscape(a.src)}"/>\n`
+    + `        </asset>`
+  );
+
+  const totalDur = Math.max(...sorted.map((it) => it.startSec + (it.duration || 0)));
+
+  return [
+    `<?xml version="1.0" encoding="UTF-8"?>`,
+    `<!DOCTYPE fcpxml>`,
+    `<fcpxml version="1.9">`,
+    `    <resources>`,
+    `        <format id="r1" name="${fpsName}"`
+    + ` frameDuration="${fd}/${tb}s" width="${width}" height="${height}"/>`,
+    ...assetLines,
+    `    </resources>`,
+    `    <library>`,
+    `        <event name="${xmlEscape(projectName)}">`,
+    `            <project name="${xmlEscape(projectName)}">`,
+    `                <sequence format="r1" duration="${T(totalDur)}"`
+    + ` tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">`,
+    `                <spine>`,
+    ...body,
+    `                </spine>`,
+    `                </sequence>`,
+    `            </project>`,
+    `        </event>`,
+    `    </library>`,
+    `</fcpxml>`,
+  ].join('\n');
+}

@@ -12,7 +12,7 @@
  */
 
 // 中身を直したらこの番号を上げる。上げ忘れると古いままが出る。
-const VERSION = 'v11';
+const VERSION = 'v12';
 const CACHE = `synccheck-${VERSION}`;
 
 // 相対パスにしておく。GitHub Pages ではサイトが

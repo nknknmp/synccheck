@@ -217,7 +217,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
-      <span class="ver" id="ver" title="いま動いている版">v11</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v12</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -281,6 +281,10 @@
   <div id="exportRow" class="row hidden">
     <button class="ghost" id="expTxt">結果をテキストで保存</button>
     <button class="ghost" id="expCsv">CSV で保存</button>
+    <label class="inline" title="編集ソフトに読ませて自動で並べる">
+      <input type="checkbox" id="wantFcp"> fcpxml も出す
+    </label>
+    <button class="ghost hidden" id="expFcp">fcpxml で保存</button>
     <span class="hint">タイムコードは上のフレームレートで計算します</span>
   </div>
 
@@ -289,7 +293,7 @@
 <script type="module">
 import { lineUp } from './src/lineup.js';
 import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
-import { buildLineupText, buildLineupCSV, saveText,
+import { buildLineupText, buildLineupCSV, buildLineupFCPXML, saveText,
          fmtClock, toFrames, framesToTimecode } from './src/export.js';
 
 // 放り込んだ動画（A側/B側の区別は持たない）
@@ -606,6 +610,34 @@ $('expCsv').onclick = () => {
   if (!lastLine) return;
   saveText(`SyncCheck_${stamp()}.csv`,
     buildLineupCSV(lastLine, Number($('fps').value)), 'text/csv');
+};
+
+/*
+ * fcpxml を出すかどうか。既定はオフ。
+ *
+ * 編集ソフトを使わない人には要らないボタンなので、既定では隠す。
+ * 選択は localStorage に覚えるので、一度入れれば次からそのまま。
+ */
+const FCP_KEY = 'synccheck.wantFcp';
+function applyFcpOption() {
+  const on = $('wantFcp').checked;
+  $('expFcp').classList.toggle('hidden', !on);
+  try { localStorage.setItem(FCP_KEY, on ? '1' : '0'); } catch (_) { /* 無視 */ }
+}
+try {
+  $('wantFcp').checked = localStorage.getItem(FCP_KEY) === '1';
+} catch (_) { /* プライベートモードなどで使えないことがある */ }
+$('wantFcp').onchange = applyFcpOption;
+applyFcpOption();
+
+$('expFcp').onclick = () => {
+  if (!lastLine) return;
+  try {
+    const xml = buildLineupFCPXML(lastLine, { fps: Number($('fps').value) });
+    saveText(`SyncCheck_${stamp()}.fcpxml`, xml, 'application/xml');
+  } catch (err) {
+    alert('書き出せませんでした: ' + err.message);
+  }
 };
 
 // フレームレートを変えたら、測り直さずに表示だけ作り直す。
