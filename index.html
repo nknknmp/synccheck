@@ -217,7 +217,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
-      <span class="ver" id="ver" title="いま動いている版">v10</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v11</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -460,7 +460,7 @@ $('run').onclick = async () => {
     const line = await lineUp(clips, (p) => {
       if (p.total > 0) setBar(0.25 + (p.done / p.total) * 0.75);
       if (p.message) log('  ' + p.message);
-    }, mlen);
+    }, mlen, Number($('fps').value));
 
     lastLine = line;
     showLineup(line);

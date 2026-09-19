@@ -105,7 +105,10 @@ export function guessStarts(files) {
  * @param {(p:object)=>void} onProgress
  * @returns {{items:Array, notes:Array}}
  */
-export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
+export async function lineUp(files, onProgress = () => {}, maxLenSec = 180,
+                             fps = 30) {
+  // 隣接させる計算はフレーム単位で行う（下の「フレーム単位で隣接」参照）。
+  // 秒のまま足すと、端数の丸めで1〜2フレームずれる。
   if (files.length === 0) return { items: [], notes: [] };
 
   const notes = [];
@@ -242,7 +245,12 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
   //
   // 島の中の位置は音で確かめてあるが、島と島の前後は分からない。
   // 撮影時刻の順（order の順）で、重ならないよう後ろへ積む。
-  const ISLAND_GAP_SEC = 2;
+  // ■ 島どうしは隙間なく隣接させる
+  //
+  // 前の島が終わった**次の1フレーム**から次の島を始める。
+  // 編集ソフトでそのまま繋げて並べられるようにするため。
+  // （2026-09-19 まで2秒の隙間を空けていた。根拠のない値で、
+  //   編集時に手で詰める手間になるだけだった）
   const islandIds = [...new Set(island.filter((v) => v >= 0))];
   if (islandIds.length > 1) {
     // 各島の代表（order の中でいちばん前にあるもの）で順番を決める
@@ -253,15 +261,34 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
     const sortedIslands = [...firstIdx.entries()]
       .sort((a, b) => a[1] - b[1]).map(([id]) => id);
 
-    let base = 0;
+    // ■ フレーム単位で隣接させる
+    //
+    // 前の島が終わった**次のフレーム**から次の島を始める。
+    // 編集ソフトでそのまま繋げて並べられるようにするため。
+    //
+    // フレーム番号は 0 から始まるので、長さ N フレームのクリップは
+    // 0 〜 N-1 を占め、**次のクリップの先頭は N**。+1 は要らない。
+    //
+    //   次の開始 = 前の開始フレーム + floor(長さ * fps)
+    //
+    // 長さは端数を切り捨てる。切り上げや四捨五入だと、実際には
+    // 存在しないフレームぶん先へ進んでしまう
+    // （実素材 847.445秒 = 25423.35フレーム → 25423 が正しい）。
+    //
+    // 秒のまま足して最後にフレームへ直すと丸めで1〜2フレームずれるので、
+    // 必ずフレーム単位で積む。
+    const toF = (sec) => Math.round(sec * fps);
+    const durF = (sec) => Math.floor(sec * fps);
+    let baseFrame = 0;
     for (const id of sortedIslands) {
       const members = [];
       for (let k = 0; k < order.length; k++) if (island[k] === id) members.push(k);
       const lo = Math.min(...members.map((k) => pos[k]));
-      const shift = base - lo;
-      for (const k of members) pos[k] += shift;
-      const hi = Math.max(...members.map((k) => pos[k] + order[k].dur));
-      base = hi + ISLAND_GAP_SEC;
+      // 島の中の相対位置は保ったまま、島の先頭を baseFrame に合わせる
+      const shiftSec = baseFrame / fps - lo;
+      for (const k of members) pos[k] += shiftSec;
+      baseFrame = Math.max(...members.map(
+        (k) => toF(pos[k]) + durF(order[k].dur)));
     }
     notes.push(
       `重なりの組が ${islandIds.length}つ に分かれています`
@@ -274,19 +301,23 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
   // 確定済みの最後尾より後ろに、重ならないよう間隔を空けて置く。
   // 撮影時刻のずれをそのまま持ち込むと大きく外れるため、
   // 「順番だけは合っている」状態にとどめる。
-  const GAP_SEC = 2;
-  let tail = 0;
+  // 単独のクリップも同じく、直前の終わりの次のフレームから。
+  const toFrame = (sec) => Math.round(sec * fps);
+  const durFrame = (sec) => Math.floor(sec * fps);
+  let tailFrame = 0;
   for (let i = 0; i < order.length; i++) {
-    if (pos[i] != null) tail = Math.max(tail, pos[i] + order[i].dur);
+    if (pos[i] != null) {
+      tailFrame = Math.max(tailFrame,
+                           toFrame(pos[i]) + durFrame(order[i].dur));
+    }
   }
   const lonely = [];
   for (let i = 0; i < order.length; i++) {
     if (pos[i] == null) lonely.push(i);
   }
   for (const i of lonely) {
-    tail += GAP_SEC;
-    pos[i] = tail;
-    tail += order[i].dur;
+    pos[i] = tailFrame / fps;
+    tailFrame += durFrame(order[i].dur);
   }
   if (lonely.length) {
     notes.push(

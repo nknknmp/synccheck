@@ -27,8 +27,7 @@ import sys
 
 failed = 0
 MIN_OVERLAP_SEC = 20
-ISLAND_GAP_SEC = 2
-GAP_SEC = 2
+FPS = 30
 
 
 def ok(cond, label, extra=''):
@@ -88,29 +87,40 @@ def line_up(files, links):
             pos[i] = pos[j] - off
             island[i] = island[j]
 
-    # 島を時間順に積む
+    # 島を時間順に積む（フレーム単位で隣接させる）
+    #
+    # フレーム番号は0始まりなので、長さ N フレームのクリップは
+    # 0〜N-1 を占め、次のクリップの先頭は N。+1 は要らない。
+    # 長さは切り捨て（切り上げると存在しないフレームぶん進む）。
+    def toF(sec):
+        return int(round(sec * FPS))
+
+    def durF(sec):
+        return int(sec * FPS)          # 切り捨て
+
     ids = sorted({v for v in island if v >= 0},
                  key=lambda v: min(k for k in range(n) if island[k] == v))
     if len(ids) > 1:
-        base = 0.0
+        base_frame = 0
         for idv in ids:
             members = [k for k in range(n) if island[k] == idv]
             lo = min(pos[k] for k in members)
-            shift = base - lo
+            shift = base_frame / FPS - lo
             for k in members:
                 pos[k] += shift
-            base = max(pos[k] + files[k]['duration'] for k in members) + ISLAND_GAP_SEC
+            base_frame = max(toF(pos[k]) + durF(files[k]['duration'])
+                             for k in members)
 
-    # 1カメだけのものを後ろへ
-    tail = 0.0
+    # 1カメだけのものを後ろへ（同じく隣接）
+    tail_frame = 0
     for k in range(n):
         if pos[k] is not None:
-            tail = max(tail, pos[k] + files[k]['duration'])
+            tail_frame = max(tail_frame,
+                             toF(pos[k]) + durF(files[k]['duration']))
     lonely = [k for k in range(n) if pos[k] is None]
     for k in lonely:
-        tail += GAP_SEC
-        pos[k] = tail
-        tail += files[k]['duration']
+        pos[k] = tail_frame / FPS
+        tail_frame += durF(files[k]['duration'])
 
     mn = min(pos)
     out = [{'name': files[k]['name'], 'startSec': pos[k] - mn,
@@ -141,10 +151,23 @@ ok(min(pos.values()) == 0, 'いちばん早いものが 0')
 ok(all(v >= 0 for v in pos.values()), '負の位置が無い')
 
 print()
+print('=== 島どうしが隙間なく隣接すること ===')
+# 実素材の実測: k1.mov は 847.445秒 = 25423.35フレーム
+#   → 占めるのは 0〜25422、次の開始は 25423
+files2 = [mk('a.mov', 847.445), mk('b.mov', 100.0)]
+res2 = line_up(files2, [])        # 重なりなし＝2本とも単独
+pos2 = {r['name']: r['startSec'] for r in res2}
+near(round(pos2['b.mov'] * 30), 25423, 0, 'b は a の次のフレームから',)
+ok(round(pos2['a.mov'] * 30) == 0, 'a は 0 から')
+
+print()
 print('=== 島が2つに分かれること ===')
-ok(pos['3.mov'] > pos['1.mov'] + 847.4,
-   '実技3 の島は実技1 の島より後ろ（重ならない）',
+# 隙間なく隣接させるので「ちょうど終わりの位置」から始まる（> ではなく >=）
+ok(pos['3.mov'] >= pos['1.mov'] + 847.4 - 0.05,
+   '実技3 の島は実技1 の島の直後から始まる',
    '(3.mov=%.1f / 1.mov終わり=%.1f)' % (pos['3.mov'], pos['1.mov'] + 847.4))
+ok(pos['3.mov'] < pos['1.mov'] + 847.4 + 1.0,
+   '余計な隙間が空いていない（1秒以内）')
 
 print()
 print('=== 2本だけ（いちばん普通の使い方）===')
