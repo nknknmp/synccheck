@@ -64,6 +64,77 @@ export function fmtFrames(sec, fps) {
 }
 
 /**
+ * フレーム数をタイムコードにする。
+ *
+ *   105 フレーム / 30fps → "00:00:03:15"
+ *
+ * 編集ソフトのタイムラインに打ち込む形。秒の小数（3.50秒）と
+ * 紛らわしいので、置き場所はこちらで見せる。
+ *   3.50秒  = 小数の秒 = 105フレーム
+ *   3:15    = 3秒15フレーム = 105フレーム   ← 同じ位置
+ *
+ * ■ ドロップフレームは使わない
+ *
+ * 29.97 で長時間を扱うとき、放送用には ; 区切りのドロップフレーム
+ * 表記がある（実時間に合わせるためフレーム番号を飛ばす）。
+ * このアプリが出すのは「素材を置く位置」であって時刻ではないので、
+ * 番号を飛ばさない素直な数え方（ノンドロップ）にする。
+ * 飛ばすと、フレーム数から計算した位置と表記がずれる。
+ */
+export function framesToTimecode(frames, fps) {
+  const neg = frames < 0;
+  let f = Math.abs(Math.round(frames));
+
+  // タイムコードの1秒は「切り上げた整数fps」ぶんのフレーム。
+  // 29.97 なら 30 コマで1秒と数える（ノンドロップ）。
+  const base = Math.round(realFps(fps));
+
+  const ff = f % base;
+  const totalSec = Math.floor(f / base);
+  const ss = totalSec % 60;
+  const mm = Math.floor(totalSec / 60) % 60;
+  const hh = Math.floor(totalSec / 3600);
+
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${neg ? '-' : ''}${p2(hh)}:${p2(mm)}:${p2(ss)}:${p2(ff)}`;
+}
+
+/**
+ * 秒から直接タイムコードにする。
+ */
+export function secToTimecode(sec, fps) {
+  return framesToTimecode(toFrames(sec, fps), fps);
+}
+
+/**
+ * 2本をタイムラインのどこに置けばよいかを返す。
+ *
+ * ■ なぜ「ずらす量」ではなく「置く位置」なのか
+ *
+ * 「B を 105 フレーム前へ」と言われても、タイムラインに置くときは
+ * そこから位置を計算し直すことになる。最初から置き場所を出す。
+ *
+ * 先に始まっているほうを 0 に置き、もう片方を後ろへずらす。
+ * こうすると負の位置が出ないので、そのまま打ち込める。
+ *
+ * @param {number} offsetSec  B の遅れ（正なら B が後発）
+ * @returns {{aFrames:number, bFrames:number, aTc:string, bTc:string}}
+ */
+export function placement(offsetSec, fps) {
+  const f = toFrames(offsetSec, fps);
+  // offsetSec > 0 … B が後発 → A を 0、B を +f
+  // offsetSec < 0 … B が先発 → B を 0、A を +|f|
+  const aFrames = f >= 0 ? 0 : -f;
+  const bFrames = f >= 0 ? f : 0;
+  return {
+    aFrames,
+    bFrames,
+    aTc: framesToTimecode(aFrames, fps),
+    bTc: framesToTimecode(bFrames, fps),
+  };
+}
+
+/**
  * 端数がどれだけ出たかを秒で返す。
  *
  * フレーム単位に丸めると必ず誤差が出る。30fps なら最大 1/60秒（0.017秒）。
@@ -105,10 +176,15 @@ export function buildReportText(results, summary, meta = {}) {
     }
 
     const fr = toFrames(r.totalOffsetSec, fps);
-    L.push(`  合わせるズレ  ${fmtFrames(r.totalOffsetSec, fps)}`
-           + `（${fmtOffset(r.totalOffsetSec)}）`);
-    L.push(`    B側を ${Math.abs(fr)} フレーム `
-           + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}へ`);
+    const pl = placement(r.totalOffsetSec, fps);
+    L.push(`  タイムラインに置く位置`);
+    L.push(`    ${r.pair.a.name}`);
+    L.push(`      ${pl.aTc}   (${pl.aFrames} フレーム)`);
+    L.push(`    ${r.pair.b.name}`);
+    L.push(`      ${pl.bTc}   (${pl.bFrames} フレーム)`);
+    L.push(`  ずらす量  ${Math.abs(fr)} フレーム `
+           + `（${fmtOffset(r.totalOffsetSec)} / B側を`
+           + `${r.totalOffsetSec >= 0 ? '後ろ' : '前'}へ）`);
     const rem = frameRemainderSec(r.totalOffsetSec, fps);
     if (Math.abs(rem) >= 0.005) {
       L.push(`    ※ フレームに丸めた端数 ${(rem * 1000).toFixed(0)}ミリ秒`);
@@ -144,9 +220,14 @@ export function buildReportText(results, summary, meta = {}) {
 
   L.push('── 読み方 ────────────────────');
   L.push('');
-  L.push('「合わせるズレ」が +3.13秒 なら、B側の映像を');
-  L.push('タイムライン上で 3.13秒 後ろにずらすと合う。');
-  L.push('負の値なら前にずらす。');
+  L.push('「タイムラインに置く位置」のとおりに2本を置けば合う。');
+  L.push('先に始まっているほうが 00:00:00:00 になる。');
+  L.push('');
+  L.push('  例) A側 00:00:03:15 / B側 00:00:00:00');
+  L.push('      → B を頭に置き、A を 3秒15フレーム の位置に置く');
+  L.push('');
+  L.push('タイムコードは「時:分:秒:フレーム」。');
+  L.push('3:15 は 3.15秒 ではなく 3秒15フレーム（= 105フレーム）。');
   L.push('');
   L.push('★ が付いた組は、値をそのまま使わないこと。');
   L.push('  音が似ている区間で誤検出している可能性がある。');
@@ -156,22 +237,28 @@ export function buildReportText(results, summary, meta = {}) {
   return L.join('\n');
 }
 
-export function buildCSV(results) {
+export function buildCSV(results, fps = 30) {
   const rows = [[
-    'A側ファイル', 'B側ファイル', '合わせるズレ秒', '撮影時刻の差秒',
+    'A側ファイル', 'B側ファイル',
+    'A側の置き場所TC', 'A側の置き場所フレーム',
+    'B側の置き場所TC', 'B側の置き場所フレーム',
+    '合わせるズレ秒', 'ずらすフレーム', '撮影時刻の差秒',
     '音で測った差秒', '重なり秒', '測定長秒', 'スコア',
     'ドリフト', '信用できない', '備考',
   ]];
 
   for (const r of results) {
     if (!r.ok) {
-      rows.push([r.pair.a.name, r.pair.b.name, '', '', '',
+      rows.push([r.pair.a.name, r.pair.b.name, '', '', '', '', '', '', '', '',
                  r.pair.overlapSec.toFixed(1), '', '', '', '', r.reason]);
       continue;
     }
+    const pl = placement(r.totalOffsetSec, fps);
     rows.push([
       r.pair.a.name, r.pair.b.name,
-      r.totalOffsetSec.toFixed(3), r.timeGapSec.toFixed(3),
+      pl.aTc, String(pl.aFrames), pl.bTc, String(pl.bFrames),
+      r.totalOffsetSec.toFixed(3),
+      String(toFrames(r.totalOffsetSec, fps)), r.timeGapSec.toFixed(3),
       r.measuredSec.toFixed(3), r.pair.overlapSec.toFixed(1),
       r.measuredLenSec.toFixed(0), r.score.toFixed(4),
       r.drift ? 'あり' : '', r.lowConfidence ? 'はい' : '',

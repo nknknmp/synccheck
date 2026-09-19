@@ -174,6 +174,18 @@
   .hidden { display: none !important; }
   /* いま動いている版。古いキャッシュが残っていないか目で見て分かるように
      （符号バグを直しても端末に届かない事故があったため） */
+  /* 置き場所の表（これが答えの本体） */
+  .place { margin: 10px 0 6px; border: 1px solid var(--line);
+           border-radius: 6px; overflow: hidden; }
+  .prow { display: flex; align-items: center; gap: 10px;
+          padding: 8px 12px; background: var(--panel2); }
+  .prow + .prow { border-top: 1px solid var(--line); }
+  .pn { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; font-size: 13px; color: var(--dim); }
+  .ptc { font-family: Consolas, "Courier New", monospace; font-size: 20px;
+         color: var(--fg); letter-spacing: 0.5px; }
+  .pf { font-size: 12px; color: var(--dim); min-width: 84px; text-align: right; }
+
   /* 結果カードの補助表示 */
   .expl .sub2 { color: var(--dim); font-weight: normal; margin-left: 6px;
                 font-size: 13px; }
@@ -188,7 +200,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">2カメのズレを測る</span>
-      <span class="ver" id="ver" title="いま動いている版">v4</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v5</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -278,7 +290,7 @@ import { measureAll, summarize } from './src/measure.js';
 import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
 import { buildReportText, buildCSV, buildJSON, buildFCPXML, saveText,
          fmtOffset, fmtClock, fmtFrames, toFrames,
-         frameRemainderSec } from './src/export.js';
+         frameRemainderSec, placement, framesToTimecode } from './src/export.js';
 
 const groups = { A: [], B: [] };
 let lastResults = null;
@@ -576,16 +588,30 @@ function showResults(results, summary, orphans) {
     const frames = toFrames(r.totalOffsetSec, fps);
     const rem = frameRemainderSec(r.totalOffsetSec, fps);
     const dir = r.totalOffsetSec >= 0 ? '後ろ' : '前';
+    // タイムラインのどこに置くか。先に始まったほうが 0 になる。
+    const pl = placement(r.totalOffsetSec, fps);
+    const aName = r.pair.a.name;
+    const bName = r.pair.b.name;
 
     d.innerHTML =
       `<div class="head">`
       + `<span class="names">${r.label}</span>`
-      + `<span class="big">${fmtFrames(r.totalOffsetSec, fps)}</span>`
+      + `<span class="big">${pl.aFrames === 0 ? pl.bTc : pl.aTc}</span>`
       + `</div>`
-      + `<div class="expl">B側を <strong>${Math.abs(frames)} フレーム</strong> `
-      + `${dir}にずらすと合います`
-      + `<span class="sub2">（${fps}fps / ${fmtOffset(r.totalOffsetSec)}）</span>`
+      // ■ 置き場所を主役にする
+      // 「105フレームずらす」と言われても、タイムラインに置くときは
+      // そこから位置を計算し直すことになるため。
+      + `<div class="place">`
+      + `<div class="prow"><span class="pn">${aName}</span>`
+      + `<span class="ptc">${pl.aTc}</span>`
+      + `<span class="pf">${pl.aFrames} フレーム</span></div>`
+      + `<div class="prow"><span class="pn">${bName}</span>`
+      + `<span class="ptc">${pl.bTc}</span>`
+      + `<span class="pf">${pl.bFrames} フレーム</span></div>`
       + `</div>`
+      + `<div class="expl">この位置に置くと合います`
+      + `<span class="sub2">（${fps}fps / ずらす量 ${Math.abs(frames)} フレーム`
+      + ` = ${fmtOffset(r.totalOffsetSec)}）</span></div>`
       // フレームに丸めた端数。大きいときだけ出す（30fps で 0.017秒 が上限）
       + (Math.abs(rem) >= 0.005
         ? `<div class="rem">フレームに合わせるため ${Math.abs(rem * 1000).toFixed(0)}ミリ秒 の端数が出ます</div>`
@@ -593,7 +619,7 @@ function showResults(results, summary, orphans) {
       + flags.join('')
       + `<dl class="kv">`
       + `<dt>ずらす量</dt><dd>${Math.abs(frames)} フレーム`
-      + `（${fmtOffset(r.totalOffsetSec)}）</dd>`
+      + `（${fmtOffset(r.totalOffsetSec)} / B側を${dir}へ）</dd>`
       + `<dt>撮影時刻の差</dt><dd>${fmtOffset(r.timeGapSec)}</dd>`
       + `<dt>音で測った差</dt><dd>${fmtOffset(r.measuredSec)}</dd>`
       + `<dt>重なり</dt><dd>${r.pair.overlapSec.toFixed(1)}秒`
@@ -632,7 +658,8 @@ $('expTxt').onclick = () => {
 
 $('expCsv').onclick = () => {
   if (!lastResults) return;
-  saveText(`SyncCheck_${stamp()}.csv`, buildCSV(lastResults), 'text/csv');
+  saveText(`SyncCheck_${stamp()}.csv`,
+    buildCSV(lastResults, Number($('fps').value)), 'text/csv');
 };
 
 $('expJson').onclick = () => {

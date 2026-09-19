@@ -109,6 +109,56 @@ for sec in (-3.50, -3.48, 2.017):
     print('    %+.3f秒 → %+d フレーム（端数 %+.1f ミリ秒）'
           % (sec, fr, rem * 1000))
 
+def frames_to_timecode(frames, fps):
+    neg = frames < 0
+    f = abs(int(math.floor(frames + 0.5)) if frames >= 0
+            else -int(math.floor(-frames + 0.5)))
+    base = int(round(real_fps(fps)))
+    ff = f % base
+    total = f // base
+    return '%s%02d:%02d:%02d:%02d' % (
+        '-' if neg else '', total // 3600, (total // 60) % 60, total % 60, ff)
+
+
+def placement(sec, fps):
+    f = to_frames(sec, fps)
+    a = 0 if f >= 0 else -f
+    b = f if f >= 0 else 0
+    return a, b
+
+
+print()
+print('=== タイムコード表記 ===')
+eq(frames_to_timecode(105, 30), '00:00:03:15',
+   '105フレーム/30fps = 3秒15フレーム（実素材の値）')
+eq(frames_to_timecode(0, 30), '00:00:00:00', '0フレーム')
+eq(frames_to_timecode(30, 30), '00:00:01:00', '30フレーム = 1秒ちょうど')
+eq(frames_to_timecode(29, 30), '00:00:00:29', '29フレーム = 0秒29フレーム')
+eq(frames_to_timecode(3600 * 30, 30), '01:00:00:00', '1時間ぶん')
+eq(frames_to_timecode(90, 30), '00:00:03:00', '90フレーム = 3秒ちょうど')
+# 29.97 はノンドロップで数える（30コマで1秒）
+eq(frames_to_timecode(30, 29.97), '00:00:01:00', '29.97 もノンドロップで30コマ=1秒')
+
+print()
+print('=== 置き場所（先に始まったほうが 0）===')
+# 実素材: B が 3.50秒 先行（-3.50秒）→ B を 0、A を 105
+a, b = placement(-3.50, 30)
+eq((a, b), (105, 0), 'B が先発なら A=105 / B=0')
+eq(frames_to_timecode(a, 30), '00:00:03:15', 'A の置き場所は 3:15')
+
+# 逆向き: B が後発なら A=0、B=105
+a2, b2 = placement(3.50, 30)
+eq((a2, b2), (0, 105), 'B が後発なら A=0 / B=105')
+
+# ズレなしなら両方 0
+eq(placement(0.0, 30), (0, 0), 'ズレなしは両方 0')
+
+# どちらかは必ず 0（負の位置を出さないこと）
+for sec in (-5.2, -0.1, 0.0, 0.1, 5.2):
+    a3, b3 = placement(sec, 30)
+    ok(a3 == 0 or b3 == 0, 'どちらかは必ず0 (%.1f秒)' % sec)
+    ok(a3 >= 0 and b3 >= 0, '負の位置を出さない (%.1f秒)' % sec)
+
 print()
 print('═' * 56)
 print(' 失敗: %d 件' % failed if failed else ' すべて通った')
