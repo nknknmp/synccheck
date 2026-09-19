@@ -190,6 +190,10 @@
          border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
   .how.dim2 { color: var(--warn); }
   .how.base { color: var(--dim); }
+  .diag { margin-top: 4px; font-size: 11px; color: var(--dim);
+          white-space: normal; }
+  .diag summary { cursor: pointer; color: var(--accent); }
+  .diag div { padding-left: 8px; }
   .rowwarn { display: block; font-size: 11px; color: var(--warn);
              margin-top: 2px; white-space: normal; }
   /* 1本だけ広い画面でないと窮屈なので、狭いときは縦に積む */
@@ -213,7 +217,7 @@
 <div class="wrap">
 
   <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
-      <span class="ver" id="ver" title="いま動いている版">v8</span></h1>
+      <span class="ver" id="ver" title="いま動いている版">v9</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
@@ -543,9 +547,29 @@ function showLineup(line) {
       : (it.measured
         ? `<span class="how" title="相関スコア ${it.score.toFixed(3)}">音で測定</span>`
         : '<span class="how dim2">撮影時刻のまま</span>');
+    // 診断: ずれたときに原因を切り分けられるよう、内訳を出す。
+    // 「撮影時刻の推定」と「音で測った補正」のどちらが効いたかが分かる。
+    let diag = '';
+    if (it.detail) {
+      const d = it.detail;
+      const w = d.windows.length
+        ? d.windows.map((x) => x.toFixed(2)).join(' / ') : '—';
+      diag =
+        `<details class="diag"><summary>内訳</summary>`
+        + `<div>基準にした相手: ${d.against}</div>`
+        + `<div>撮影時刻から見た差: ${d.guessGapSec.toFixed(2)}秒</div>`
+        + `<div>音で測った補正: ${d.measuredSec.toFixed(2)}秒</div>`
+        + `<div>= 置き位置 ${it.startSec.toFixed(2)}秒</div>`
+        + `<div>重なり: ${d.overlapSec.toFixed(0)}秒 / `
+        + `相関スコア: ${it.score.toFixed(3)}</div>`
+        + `<div>窓ごとの測定値: ${w}`
+        + (d.maxDeviationSec != null
+          ? `（ばらつき ${d.maxDeviationSec.toFixed(2)}秒）` : '')
+        + `</div></details>`;
+    }
     rows +=
       `<div class="prow">`
-      + `<span class="pn" title="${it.name}">${it.name}${warn}</span>`
+      + `<span class="pn" title="${it.name}">${it.name}${warn}${diag}</span>`
       + `${how}`
       + `<span class="ptc">${tc}</span>`
       + `<span class="pf">${fr} フレーム</span>`

@@ -204,9 +204,15 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
     }
 
     // 音で測る。measurePair は「b の遅れ」を返す。
+    // startSec も渡す。measurePair はこれで timeGapSec を出しており、
+    // 渡さないと NaN になる（lineup では measuredSec しか使わないので
+    // 表には出ていなかったが、壊れた値を返すのは良くない）。
     const pair = {
-      a: { ...best.p._ref.f, name: best.p.name, file: best.p.file },
-      b: { ...cur.f },
+      a: {
+        ...best.p._ref.f, name: best.p.name, file: best.p.file,
+        startSec: best.p.startSec,
+      },
+      b: { ...cur.f, startSec: best.p.startSec + best.gap },
       overlapSec: best.ov.overlapSec,
       aOffsetSec: best.ov.aOffsetSec,
       bOffsetSec: best.ov.bOffsetSec,
@@ -246,6 +252,17 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180) {
       duration: cur.dur,
       measured: true,
       score: r.score,
+      // 何がどう効いてこの位置になったかを残す。
+      // ずれたときに、撮影時刻の推定が悪いのか音の測定が悪いのかを
+      // 画面で切り分けられるようにするため。
+      detail: {
+        against: best.p.name,          // 誰と測ったか
+        guessGapSec: best.gap,         // 撮影時刻から見た差
+        measuredSec: r.measuredSec,    // 音で測った補正
+        overlapSec: best.ov.overlapSec,
+        windows: r.points ? r.points.map((x) => x.offsetSec) : [],
+        maxDeviationSec: r.maxDeviationSec,
+      },
       warn: r.lowConfidence
         ? '窓の過半数が一致しなかった。この位置は信用しないこと'
         : (r.drift ? '区間ごとにズレが変わっている' : null),
