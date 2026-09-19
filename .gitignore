@@ -34,3 +34,7 @@ test/_last_result.txt
 # ── OS が置いていくもの ────────────────────────
 Thumbs.db
 .DS_Store
+
+# Python の中間ファイル
+__pycache__/
+*.pyc
