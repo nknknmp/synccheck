@@ -534,3 +534,71 @@ export async function saveText(filename, text, mime = 'text/plain') {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return true;
 }
+
+
+/**
+ * 並べた結果をテキストにする。
+ *
+ * 画面と同じものを、そのまま貼れる形で出す。
+ */
+export function buildLineupText(line, fps = 30) {
+  const L = [];
+  L.push('════════════════════════════════════════');
+  L.push(' SyncCheck クリップを置く位置');
+  L.push('════════════════════════════════════════');
+  L.push('');
+  L.push(`測った日時: ${new Date().toLocaleString('ja-JP')}`);
+  L.push(`フレームレート: ${fps}fps`);
+  L.push('');
+  L.push('── 置く位置 ──────────────────');
+  L.push('');
+
+  const w = Math.max(...line.items.map((i) => i.name.length), 8);
+  for (const it of line.items) {
+    const fr = toFrames(it.startSec, fps);
+    L.push(`  ${it.name.padEnd(w)}   ${framesToTimecode(fr, fps)}`
+           + `   ${String(fr).padStart(7)} フレーム`
+           + `${it.measured ? '' : '   ※撮影時刻のまま'}`);
+    if (it.warn) L.push(`  ${' '.repeat(w)}   ★ ${it.warn}`);
+  }
+
+  if (line.notes && line.notes.length) {
+    L.push('');
+    L.push('── 注意 ──────────────────────');
+    for (const n of line.notes) L.push(`  ・${n}`);
+  }
+
+  L.push('');
+  L.push('── 読み方 ────────────────────');
+  L.push('');
+  L.push('いちばん早い1本が 00:00:00:00。');
+  L.push('それぞれをこの位置に置けば合う。');
+  L.push('');
+  L.push('タイムコードは「時:分:秒:フレーム」。');
+  L.push('3:15 は 3.15秒 ではなく 3秒15フレーム。');
+  L.push('');
+  L.push('════════════════════════════════════════');
+  return L.join('\n');
+}
+
+/**
+ * 並べた結果を CSV にする。
+ */
+export function buildLineupCSV(line, fps = 30) {
+  const rows = [['ファイル', '置く位置TC', '置く位置フレーム',
+                 '置く位置秒', '長さ秒', '測り方', 'スコア', '注意']];
+  for (const it of line.items) {
+    const fr = toFrames(it.startSec, fps);
+    rows.push([
+      it.name, framesToTimecode(fr, fps), String(fr),
+      it.startSec.toFixed(3), (it.duration || 0).toFixed(1),
+      it.measured ? '音で測定' : '撮影時刻',
+      it.score != null ? it.score.toFixed(4) : '',
+      it.warn || '',
+    ]);
+  }
+  return rows.map((r) => r.map((c) => {
+    const v = String(c);
+    return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }).join(',')).join('\n');
+}

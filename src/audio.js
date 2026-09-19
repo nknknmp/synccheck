@@ -187,9 +187,7 @@ export async function readMeta(file) {
     // 入力側の行だけを見る。-f null で出る出力側の行にも fps があり、
     // そちらは変換後の値なので素材のものではない。
     let fps = null;
-    const vLine = text.match(/Stream #\d+:\d+[^
-]*: Video:[^
-]*/);
+    const vLine = text.match(/Stream #\d+:\d+[^\n]*: Video:[^\n]*/);
     if (vLine) {
       const m = vLine[0].match(/([\d.]+)\s*fps/);
       if (m) {

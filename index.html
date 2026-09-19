@@ -185,6 +185,18 @@
   .ptc { font-family: Consolas, "Courier New", monospace; font-size: 20px;
          color: var(--fg); letter-spacing: 0.5px; }
   .pf { font-size: 12px; color: var(--dim); min-width: 84px; text-align: right; }
+  /* どうやって位置を決めたか（音で測ったか、撮影時刻のままか） */
+  .how { font-size: 11px; color: var(--ok); border: 1px solid var(--line);
+         border-radius: 10px; padding: 1px 8px; white-space: nowrap; }
+  .how.dim2 { color: var(--warn); }
+  .rowwarn { display: block; font-size: 11px; color: var(--warn);
+             margin-top: 2px; white-space: normal; }
+  /* 1本だけ広い画面でないと窮屈なので、狭いときは縦に積む */
+  @media (max-width: 560px) {
+    .prow { flex-wrap: wrap; }
+    .pn { flex: 1 1 100%; }
+    .ptc { font-size: 18px; }
+  }
 
   /* 結果カードの補助表示 */
   .expl .sub2 { color: var(--dim); font-weight: normal; margin-left: 6px;
@@ -199,42 +211,29 @@
 <body>
 <div class="wrap">
 
-  <h1>SyncCheck<span class="sub">2カメのズレを測る</span>
-      <span class="ver" id="ver" title="いま動いている版">v5</span></h1>
+  <h1>SyncCheck<span class="sub">クリップを置く位置を出す</span>
+      <span class="ver" id="ver" title="いま動いている版">v6</span></h1>
 
   <div class="note">
     <strong>動画はこの端末から出ません。</strong>
     ブラウザの中で音声だけを読んで計算します。アップロードは発生しません。<br>
-    途中で録画を止めて再開した素材（A側3本・B側3本など）に対応しています。
-    <strong>組ごとに別々に測ります</strong>（再開するたびにズレ方が変わるため）。
+    何本でもまとめて放り込めます。<strong>いちばん早い1本を 00:00:00:00
+    として、それぞれをどこに置くか</strong>を出します。
   </div>
 
-  <h2>1. 素材を選ぶ</h2>
+  <h2>1. 動画を放り込む</h2>
 
-  <div class="groups">
-    <div class="group">
-      <h3>A側<span class="tag">基準になるカメラ</span></h3>
-      <div class="drop" id="dropA">
-        <div class="big">ここにドロップ</div>
-        <div class="hint">クリックしても選べます（複数可）</div>
-        <input type="file" id="fileA" multiple accept="video/*,audio/*" class="hidden">
-      </div>
-      <ul class="filelist" id="listA"></ul>
-    </div>
-
-    <div class="group">
-      <h3>B側<span class="tag">合わせたいカメラ</span></h3>
-      <div class="drop" id="dropB">
-        <div class="big">ここにドロップ</div>
-        <div class="hint">クリックしても選べます（複数可）</div>
-        <input type="file" id="fileB" multiple accept="video/*,audio/*" class="hidden">
-      </div>
-      <ul class="filelist" id="listB"></ul>
-    </div>
+  <div class="drop" id="drop">
+    <div class="big">ここにまとめてドロップ</div>
+    <div class="hint">クリックしても選べます。2本でも6本でもまとめてどうぞ</div>
+    <input type="file" id="file" multiple accept="video/*,audio/*" class="hidden">
   </div>
+  <ul class="filelist" id="list"></ul>
+
+  <h2>2. 測る</h2>
 
   <div class="row">
-    <button class="primary" id="run" disabled>ズレを測る</button>
+    <button class="primary" id="run" disabled>置く位置を出す</button>
     <button class="ghost" id="clear">全部消す</button>
     <label class="inline">
       測る長さ
@@ -277,26 +276,21 @@
   <div id="exportRow" class="row hidden">
     <button class="ghost" id="expTxt">結果をテキストで保存</button>
     <button class="ghost" id="expCsv">CSV で保存</button>
-    <button class="ghost" id="expJson">JSON で保存</button>
-    <button class="ghost" id="expFcp">fcpxml で保存</button>
-    <span class="hint">fcpxml は上のフレームレートで書き出します</span>
+    <span class="hint">タイムコードは上のフレームレートで計算します</span>
   </div>
 
 </div>
 
 <script type="module">
-import { buildTimeline, findOverlappingPairs, findOrphans } from './src/timeline.js';
-import { measureAll, summarize } from './src/measure.js';
+import { lineUp } from './src/lineup.js';
 import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
-import { buildReportText, buildCSV, buildJSON, buildFCPXML, saveText,
-         fmtOffset, fmtClock, fmtFrames, toFrames,
-         frameRemainderSec, placement, framesToTimecode } from './src/export.js';
+import { buildLineupText, buildLineupCSV, saveText,
+         fmtClock, toFrames, framesToTimecode } from './src/export.js';
 
-const groups = { A: [], B: [] };
-let lastResults = null;
-let lastSummary = null;
+// 放り込んだ動画（A側/B側の区別は持たない）
+let clips = [];
 // フレームレートを変えたとき、測り直さず描き直すために持っておく
-let lastOrphans = null;
+let lastLine = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -319,49 +313,47 @@ $('ffmpeglog').onchange = (e) => {
 
 // --- ファイルの受け取り ---------------------------------------------------
 
-for (const g of ['A', 'B']) {
-  const drop = $('drop' + g);
-  const input = $('file' + g);
+{
+  const drop = $('drop');
+  const input = $('file');
 
   drop.onclick = () => input.click();
-  input.onchange = () => { addFiles(g, [...input.files]); input.value = ''; };
+  input.onchange = () => { addFiles([...input.files]); input.value = ''; };
 
   drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
   drop.ondragleave = () => drop.classList.remove('over');
   drop.ondrop = (e) => {
     e.preventDefault();
     drop.classList.remove('over');
-    addFiles(g, [...e.dataTransfer.files]);
+    addFiles([...e.dataTransfer.files]);
   };
 }
 
-async function addFiles(g, files) {
+async function addFiles(files) {
   for (const file of files) {
-    if (groups[g].some((f) => f.name === file.name)) continue;
+    if (clips.some((f) => f.name === file.name)) continue;
 
     // まず速い方法で長さだけ読んで、すぐ一覧に出す
     const duration = await readDurationQuick(file);
-    groups[g].push({
+    clips.push({
       name: file.name, file, duration,
       lastModified: file.lastModified,
-      creationMs: null, hasAudio: null, probed: false,
+      creationMs: null, hasAudio: null, fps: null, probed: false,
     });
     render();
   }
 }
 
 function render() {
-  for (const g of ['A', 'B']) {
-    const ul = $('list' + g);
-    ul.innerHTML = '';
-    if (groups[g].length === 0) {
-      const li = document.createElement('li');
-      li.className = 'empty';
-      li.textContent = 'まだありません';
-      ul.appendChild(li);
-      continue;
-    }
-    for (const f of groups[g]) {
+  const ul = $('list');
+  ul.innerHTML = '';
+  if (clips.length === 0) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    li.textContent = 'まだありません';
+    ul.appendChild(li);
+  } else {
+    for (const f of clips) {
       const li = document.createElement('li');
       const audioWarn = f.hasAudio === false
         ? '<span class="noaudio">音声なし</span>' : '';
@@ -374,20 +366,20 @@ function render() {
       del.textContent = '×';
       del.title = 'この素材を外す';
       del.onclick = () => {
-        groups[g] = groups[g].filter((x) => x.name !== f.name);
+        clips = clips.filter((x) => x.name !== f.name);
         render();
       };
       li.appendChild(del);
       ul.appendChild(li);
     }
   }
-  $('run').disabled = !(groups.A.length > 0 && groups.B.length > 0);
+  // 1本でも位置は出る（必ず 0 になる）が、意味があるのは2本から
+  $('run').disabled = clips.length < 2;
 }
 
 $('clear').onclick = () => {
-  groups.A = []; groups.B = [];
-  lastResults = null;
-  lastOrphans = null;
+  clips = [];
+  lastLine = null;
   $('results').innerHTML = '';
   $('exportRow').classList.add('hidden');
   $('log').textContent = '';
@@ -408,11 +400,10 @@ $('run').onclick = async () => {
     log('FFmpeg を準備しています（初回は数十MBの読み込みがあります）');
     await loadFFmpeg((p) => { if (p.type === 'log') log('  ' + p.message); });
 
-    // 撮影時刻を読む。ここで初めて ffmpeg を通す。
-    log('撮影時刻を読んでいます');
-    const all = [...groups.A, ...groups.B];
+    // 撮影時刻と長さを読む。ここで初めて ffmpeg を通す。
+    log('素材を調べています');
     let n = 0;
-    for (const f of all) {
+    for (const f of clips) {
       if (!f.probed) {
         try {
           const m = await readMeta(f.file);
@@ -425,216 +416,128 @@ $('run').onclick = async () => {
         }
         f.probed = true;
       }
-      setBar((++n / all.length) * 0.25);
+      setBar((++n / clips.length) * 0.25);
       log(`  ${f.name}: ${f.duration ? fmtClock(f.duration) : '長さ不明'}`
-          + `${f.creationMs ? ' / 撮影時刻 ' + new Date(f.creationMs).toLocaleString('ja-JP') : ' / 撮影時刻なし'}`
+          + `${f.creationMs ? ' / 撮影時刻あり' : ' / 撮影時刻なし'}`
           + `${f.fps ? ' / ' + f.fps + 'fps' : ''}`
           + `${f.hasAudio === false ? ' / 音声なし' : ''}`);
     }
     applyDetectedFps();
     render();
 
-    const noAudio = all.filter((f) => f.hasAudio === false);
+    const noAudio = clips.filter((f) => f.hasAudio === false);
     if (noAudio.length > 0) {
-      showError('音声が入っていない素材があります: '
-        + noAudio.map((f) => f.name).join(', ')
-        + '。音で測るので、これらは外してください。');
-      return;
+      log(`※ 音声が無い素材があります: ${noAudio.map((f) => f.name).join(', ')}`);
     }
 
-    // 時間軸に載せて、重なる組を探す
-    const tl = buildTimeline(groups.A, groups.B);
-    const pairs = findOverlappingPairs(tl);
-    const orphans = findOrphans(tl, pairs);
-
-    log(`重なる組: ${pairs.length}組`);
-    for (const p of pairs) {
-      log(`  ${p.a.name} ↔ ${p.b.name}  重なり ${p.overlapSec.toFixed(1)}秒`);
-    }
-    if (orphans.length > 0) {
-      log(`組にならなかった素材: ${orphans.map((f) => f.name).join(', ')}`);
-    }
-
-    if (pairs.length === 0) {
-      showError(
-        '重なる組が見つかりませんでした。'
-        + '撮影時刻が失われている（クラウド経由でコピーした等）可能性があります。'
-        + 'この場合、時間軸に載せられないので組を特定できません。'
-      );
-      return;
-    }
-
-    // 組ごとに測る
+    log('');
+    log('音で位置を測っています');
     const mlen = Number($('mlen').value);
-    const results = await measureAll(pairs, (p) => {
-      setBar(0.25 + (p.done / p.total) * 0.75);
-      log(p.message);
+    const line = await lineUp(clips, (p) => {
+      if (p.total > 0) setBar(0.25 + (p.done / p.total) * 0.75);
+      if (p.message) log('  ' + p.message);
     }, mlen);
 
-    lastResults = results;
-    lastSummary = summarize(results);
-    lastOrphans = orphans;
-    showResults(results, lastSummary, orphans);
+    lastLine = line;
+    showLineup(line);
     $('exportRow').classList.remove('hidden');
     setBar(1);
   } catch (err) {
     showError('測定中にエラーが起きました: ' + err.message);
-    log('ERROR ' + (err.stack || err.message));
   } finally {
     btn.disabled = false;
+    setTimeout(() => { $('bar').style.display = 'none'; }, 600);
   }
 };
-
-function setBar(p) {
-  $('bar').querySelector('i').style.width = `${Math.round(p * 100)}%`;
-}
-
-function showError(msg) {
-  $('results').innerHTML =
-    `<div class="warnbox"><strong>測れませんでした</strong><br>${msg}</div>`;
-}
 
 /**
  * 素材から読めたフレームレートを選択欄に反映する。
  *
- * A側とB側で違うことがある（別のカメラなので当然ありうる）。
- * そのときは基準である A側 を採り、画面に断りを出す。
+ * 素材ごとに違うことがある（別のカメラなので当然ありうる）。
+ * そのときはいちばん多い値を採り、画面に断りを出す。
  * 勝手に決めて黙っていると、フレーム数が1つずれても気づけない。
  */
 function applyDetectedFps() {
   const hint = $('fpsHint');
-  const found = [...groups.A, ...groups.B].filter((f) => f.fps).map((f) => f.fps);
+  const found = clips.filter((f) => f.fps).map((f) => f.fps);
   if (found.length === 0) {
     hint.textContent = '素材から読めなかったので手で選んでください';
     return;
   }
 
-  // 選択肢にある値のうち、いちばん近いものを選ぶ
   const opts = [...$('fps').options].map((o) => Number(o.value));
   const nearest = (v) => opts.reduce((best, o) =>
     Math.abs(o - v) < Math.abs(best - v) ? o : best, opts[0]);
 
-  // 基準は A側。A に読めたものが無ければ最初に読めたものを使う。
-  const aFps = groups.A.find((f) => f.fps);
-  const pick = nearest(aFps ? aFps.fps : found[0]);
+  // いちばん多い値を採る
+  const counts = new Map();
+  for (const v of found.map(nearest)) {
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let pick = opts[0];
+  let max = -1;
+  for (const [v, c] of counts) { if (c > max) { max = c; pick = v; } }
   $('fps').value = String(pick);
 
-  const uniq = [...new Set(found.map((v) => nearest(v)))];
-  if (uniq.length > 1) {
-    hint.textContent =
-      `素材ごとに違います（${uniq.join(' / ')}）。A側の ${pick} を使います`;
+  if (counts.size > 1) {
+    hint.textContent = `素材ごとに違います（${[...counts.keys()].join(' / ')}）`
+      + `。いちばん多い ${pick} を使います`;
   } else {
     hint.textContent = `素材から読みました（${pick}fps）`;
   }
 }
 
-function showResults(results, summary, orphans) {
+/**
+ * 並べた結果を出す。
+ *
+ * これがこのアプリの答え。タイムラインに打ち込む位置をそのまま出す。
+ */
+function showLineup(line) {
   const box = $('results');
   box.innerHTML = '';
+  const fps = Number($('fps').value);
+  const { items, notes } = line;
+
+  if (items.length === 0) {
+    box.innerHTML = '<div class="pair bad"><div class="expl">'
+      + '並べられませんでした</div></div>';
+    return;
+  }
 
   const h = document.createElement('h2');
-  h.textContent = `2. 結果（${summary.ok} / ${summary.total} 組）`;
+  h.textContent = '3. この位置に置く';
   box.appendChild(h);
 
-  if (summary.warnings.length > 0 || orphans.length > 0) {
-    const w = document.createElement('div');
-    w.className = 'warnbox';
-    const items = [...summary.warnings];
-    if (orphans.length > 0) {
-      items.push(`組にならなかった素材: ${orphans.map((f) => f.name).join(', ')}`);
-    }
-    w.innerHTML = '<strong>注意</strong><ul>'
-      + items.map((x) => `<li>${x}</li>`).join('') + '</ul>';
-    box.appendChild(w);
+  const card = document.createElement('div');
+  card.className = 'pair';
+
+  let rows = '';
+  for (const it of items) {
+    const fr = toFrames(it.startSec, fps);
+    const tc = framesToTimecode(fr, fps);
+    const warn = it.warn ? `<div class="rowwarn">${it.warn}</div>` : '';
+    const how = it.measured
+      ? `<span class="how" title="相関スコア ${it.score.toFixed(3)}">音で測定</span>`
+      : '<span class="how dim2">撮影時刻</span>';
+    rows +=
+      `<div class="prow">`
+      + `<span class="pn" title="${it.name}">${it.name}${warn}</span>`
+      + `${how}`
+      + `<span class="ptc">${tc}</span>`
+      + `<span class="pf">${fr} フレーム</span>`
+      + `</div>`;
   }
 
-  for (const r of results) {
-    const d = document.createElement('div');
-    d.className = 'pair' + (r.ok ? '' : ' bad');
+  card.innerHTML =
+    `<div class="place">${rows}</div>`
+    + `<div class="expl">いちばん早い1本を 00:00:00:00 として、`
+    + `それぞれをこの位置に置くと合います`
+    + `<span class="sub2">（${fps}fps）</span></div>`
+    + (notes.length
+      ? `<div class="rem">${notes.map((x) => '・' + x).join('<br>')}</div>`
+      : '');
 
-    if (!r.ok) {
-      d.innerHTML =
-        `<div class="head"><span class="names">${r.label}</span>`
-        + `<span class="big">—</span></div>`
-        + `<div class="expl">測れませんでした: ${r.reason}</div>`;
-      box.appendChild(d);
-      continue;
-    }
-
-    const flags = [];
-    if (r.lowConfidence) {
-      flags.push('<span class="flag bad">窓の過半数が一致しなかった・値を信用しないこと</span>');
-    } else if (r.drift) {
-      flags.push('<span class="flag warn">区間ごとにズレが変わっている</span>');
-    } else {
-      flags.push('<span class="flag ok">ずれは一定</span>');
-    }
-    if (r.singleWindow) {
-      flags.push('<span class="flag warn">短いので1回しか測っていない</span>');
-    }
-    if (r.note) {
-      flags.push(`<span class="flag warn">${r.note}</span>`);
-    }
-
-    const winRows = r.points.map((p) => {
-      const out = Math.abs(p.offsetSec - r.measuredSec) > 0.5;
-      return `<tr class="${out ? 'out' : ''}">`
-        + `<td>${fmtClock(p.atSec)}</td>`
-        + `<td class="off">${fmtOffset(p.offsetSec)}</td>`
-        + `<td>${p.score.toFixed(3)}</td></tr>`;
-    }).join('');
-
-    const fps = Number($('fps').value);
-    const frames = toFrames(r.totalOffsetSec, fps);
-    const rem = frameRemainderSec(r.totalOffsetSec, fps);
-    const dir = r.totalOffsetSec >= 0 ? '後ろ' : '前';
-    // タイムラインのどこに置くか。先に始まったほうが 0 になる。
-    const pl = placement(r.totalOffsetSec, fps);
-    const aName = r.pair.a.name;
-    const bName = r.pair.b.name;
-
-    d.innerHTML =
-      `<div class="head">`
-      + `<span class="names">${r.label}</span>`
-      + `<span class="big">${pl.aFrames === 0 ? pl.bTc : pl.aTc}</span>`
-      + `</div>`
-      // ■ 置き場所を主役にする
-      // 「105フレームずらす」と言われても、タイムラインに置くときは
-      // そこから位置を計算し直すことになるため。
-      + `<div class="place">`
-      + `<div class="prow"><span class="pn">${aName}</span>`
-      + `<span class="ptc">${pl.aTc}</span>`
-      + `<span class="pf">${pl.aFrames} フレーム</span></div>`
-      + `<div class="prow"><span class="pn">${bName}</span>`
-      + `<span class="ptc">${pl.bTc}</span>`
-      + `<span class="pf">${pl.bFrames} フレーム</span></div>`
-      + `</div>`
-      + `<div class="expl">この位置に置くと合います`
-      + `<span class="sub2">（${fps}fps / ずらす量 ${Math.abs(frames)} フレーム`
-      + ` = ${fmtOffset(r.totalOffsetSec)}）</span></div>`
-      // フレームに丸めた端数。大きいときだけ出す（30fps で 0.017秒 が上限）
-      + (Math.abs(rem) >= 0.005
-        ? `<div class="rem">フレームに合わせるため ${Math.abs(rem * 1000).toFixed(0)}ミリ秒 の端数が出ます</div>`
-        : '')
-      + flags.join('')
-      + `<dl class="kv">`
-      + `<dt>ずらす量</dt><dd>${Math.abs(frames)} フレーム`
-      + `（${fmtOffset(r.totalOffsetSec)} / B側を${dir}へ）</dd>`
-      + `<dt>撮影時刻の差</dt><dd>${fmtOffset(r.timeGapSec)}</dd>`
-      + `<dt>音で測った差</dt><dd>${fmtOffset(r.measuredSec)}</dd>`
-      + `<dt>重なり</dt><dd>${r.pair.overlapSec.toFixed(1)}秒`
-      + `（うち ${r.measuredLenSec.toFixed(0)}秒 で測定）</dd>`
-      + `<dt>相関スコア</dt><dd>${r.score.toFixed(3)}</dd>`
-      + (r.singleWindow ? '' :
-         `<dt>窓のばらつき</dt><dd>最大 ${r.maxDeviationSec.toFixed(2)}秒</dd>`)
-      + `</dl>`
-      + (winRows
-        ? `<table class="win"><tr><th>測った位置</th><th>ズレ</th><th>スコア</th></tr>`
-          + winRows + `</table>`
-        : '');
-
-    box.appendChild(d);
-  }
+  box.appendChild(card);
 }
 
 // --- 書き出し -------------------------------------------------------------
@@ -647,41 +550,21 @@ function stamp() {
 }
 
 $('expTxt').onclick = () => {
-  if (!lastResults) return;
+  if (!lastLine) return;
   saveText(`SyncCheck_${stamp()}.txt`,
-    buildReportText(lastResults, lastSummary, {
-      groupAName: groups.A.map((f) => f.name).join(', '),
-      groupBName: groups.B.map((f) => f.name).join(', '),
-      fps: Number($('fps').value),
-    }), 'text/plain');
+    buildLineupText(lastLine, Number($('fps').value)), 'text/plain');
 };
 
 $('expCsv').onclick = () => {
-  if (!lastResults) return;
+  if (!lastLine) return;
   saveText(`SyncCheck_${stamp()}.csv`,
-    buildCSV(lastResults, Number($('fps').value)), 'text/csv');
-};
-
-$('expJson').onclick = () => {
-  if (!lastResults) return;
-  saveText(`SyncCheck_${stamp()}.json`,
-    buildJSON(lastResults, lastSummary), 'application/json');
-};
-
-$('expFcp').onclick = () => {
-  if (!lastResults) return;
-  try {
-    const xml = buildFCPXML(lastResults, { fps: Number($('fps').value) });
-    saveText(`SyncCheck_${stamp()}.fcpxml`, xml, 'application/xml');
-  } catch (err) {
-    alert('書き出せませんでした: ' + err.message);
-  }
+    buildLineupCSV(lastLine, Number($('fps').value)), 'text/csv');
 };
 
 // フレームレートを変えたら、測り直さずに表示だけ作り直す。
-// 測定値は秒で持っているので、換算をやり直すだけでよい。
+// 位置は秒で持っているので、換算をやり直すだけでよい。
 $('fps').onchange = () => {
-  if (lastResults) showResults(lastResults, lastSummary, lastOrphans);
+  if (lastLine) showLineup(lastLine);
 };
 
 render();
