@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8"><title>オフライン確認</title></head><body>
+<pre id="out">確認中...</pre>
+<script>
+/*
+ * サーバーを止めた状態でも一式が読めるかを、キャッシュから直接確かめる。
+ * 「圏外で開けるか」を、本当にネットを切らずに検証するための代用。
+ */
+const lines = []; const say = s => { lines.push(s); out.textContent = lines.join('\n'); };
+async function main() {
+  const names = (await caches.keys()).filter(n => n.startsWith('synccheck-'));
+  if (!names.length) throw new Error('キャッシュが無い。先に sw_check.html を開くこと');
+  const c = await caches.open(names[0]);
+  // オフラインで起動するのに要る一式
+  const must = ['../index.html','../src/audio.js','../src/sync.js','../src/measure.js',
+                '../src/export.js','../src/timeline.js','../vendor/ffmpeg/index.js',
+                '../vendor/util/index.js','../vendor/core/ffmpeg-core.js',
+                '../vendor/core/ffmpeg-core.wasm','../manifest.webmanifest','../icon.svg'];
+  let bad = [];
+  for (const u of must) { if (!await c.match(u)) bad.push(u); }
+  say('必須 ' + must.length + ' 件中、欠け ' + bad.length + ' 件');
+  if (bad.length) throw new Error('欠け: ' + bad.join(', '));
+  say('RESULT: PASS');
+}
+main().catch(e => say('RESULT: FAIL  ' + e.message))
+      .finally(() => fetch('/__test_result',{method:'POST',body:lines.join('\n')}).catch(()=>{}));
+</script></body></html>

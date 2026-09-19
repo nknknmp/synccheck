@@ -1,0 +1,111 @@
+/*
+ * SyncCheck のオフライン用キャッシュ
+ *
+ * 出先で使うのが前提なので、圏外・細い回線でも開けるようにする。
+ * 初回に一式（ffmpeg.wasm 約31MB を含む）を端末に取り込み、
+ * 2回目からはネットを見ない。
+ *
+ * ■ 動画はここを通らない
+ *
+ * キャッシュするのはこのアプリ自身のファイルだけ。測る動画は
+ * ブラウザの中で処理され、fetch そのものが発生しない。
+ */
+
+// 中身を直したらこの番号を上げる。上げ忘れると古いままが出る。
+const VERSION = 'v1';
+const CACHE = `synccheck-${VERSION}`;
+
+// 相対パスにしておく。GitHub Pages ではサイトが
+// /synccheck/ の下にぶら下がるため、絶対パスだと外れる。
+const ASSETS = [
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './icon.svg',
+  './src/audio.js',
+  './src/export.js',
+  './src/measure.js',
+  './src/sync.js',
+  './src/timeline.js',
+  './vendor/ffmpeg/index.js',
+  './vendor/ffmpeg/classes.js',
+  './vendor/ffmpeg/const.js',
+  './vendor/ffmpeg/errors.js',
+  './vendor/ffmpeg/types.js',
+  './vendor/ffmpeg/utils.js',
+  './vendor/ffmpeg/worker.js',
+  './vendor/util/index.js',
+  './vendor/util/const.js',
+  './vendor/util/errors.js',
+  './vendor/util/types.js',
+  './vendor/core/ffmpeg-core.js',
+  './vendor/core/ffmpeg-core.wasm',   // 約31MB。これが本体
+];
+
+self.addEventListener('install', (event) => {
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+
+    // addAll は1つでも失敗すると全部捨てる。31MB の wasm が
+    // 途中で切れただけで何も残らないのは困るので、1つずつ入れて
+    // 失敗したものだけ諦める（次に開いたときに拾い直せる）。
+    await Promise.all(ASSETS.map(async (url) => {
+      try {
+        const res = await fetch(url, { cache: 'reload' });
+        if (res.ok) await cache.put(url, res);
+      } catch (_) {
+        /* 入らなかったものはネットワークから読む */
+      }
+    }));
+
+    // 古い版を待たずに入れ替える。測定の途中で切り替わることは無い
+    // （測っている間はページを開いたままなので）。
+    await self.skipWaiting();
+  })());
+});
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    const names = await caches.keys();
+    await Promise.all(
+      names.filter((n) => n.startsWith('synccheck-') && n !== CACHE)
+           .map((n) => caches.delete(n))
+    );
+    await self.clients.claim();
+  })());
+});
+
+self.addEventListener('fetch', (event) => {
+  const req = event.request;
+
+  // GET 以外は素通し。テスト結果の POST（serve.py 宛）を
+  // キャッシュが横取りしないようにする。
+  if (req.method !== 'GET') return;
+
+  // 別オリジンには手を出さない。
+  if (new URL(req.url).origin !== self.location.origin) return;
+
+  event.respondWith((async () => {
+    // キャッシュ優先。出先で回線があっても細いことがあるので、
+    // 手元にあるなら必ずそれを使う。
+    const hit = await caches.match(req, { ignoreSearch: true });
+    if (hit) return hit;
+
+    try {
+      const res = await fetch(req);
+      // 取れたものはついでに残す（次から圏外でも開ける）。
+      if (res.ok && res.type === 'basic') {
+        const cache = await caches.open(CACHE);
+        cache.put(req, res.clone());
+      }
+      return res;
+    } catch (err) {
+      // 圏外でキャッシュにも無い。ナビゲーションなら入口を返す。
+      if (req.mode === 'navigate') {
+        const shell = await caches.match('./index.html');
+        if (shell) return shell;
+      }
+      throw err;
+    }
+  })());
+});

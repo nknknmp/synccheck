@@ -1,0 +1,19 @@
+{
+  "name": "SyncCheck - 2カメのズレを測る",
+  "short_name": "SyncCheck",
+  "description": "2台のカメラで撮った同じ場面の音のズレを測る。動画は端末から出ない。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1a1a1a",
+  "theme_color": "#1a1a1a",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

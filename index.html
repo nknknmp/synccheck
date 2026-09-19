@@ -4,6 +4,15 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SyncCheck - 2カメのズレを測る</title>
+<meta name="description" content="2台のカメラで撮った同じ場面の音のズレを測る。動画は端末から出ない。">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="icon" href="./icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="./icon.svg">
+<meta name="theme-color" content="#12141a">
+<!-- iPad でホーム画面に追加したとき、Safari の枠なしで開く -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="SyncCheck">
 <style>
   :root {
     --bg: #12141a;
@@ -568,6 +577,19 @@ $('expFcp').onclick = () => {
 };
 
 render();
+
+/*
+ * オフライン用の登録。
+ *
+ * 出先で使うのが前提なので、一度開いたら圏外でも起動できるようにする。
+ * 登録に失敗してもアプリ自体は動くので、握りつぶして先に進む
+ * （file:// で開いたときや、古い Safari では登録できない）。
+ */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
 </script>
 </body>
 </html>

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- SyncCheck のアイコン。2本の波形が同じ形のまま横にずれている図。
+       このアプリが測っている「ズレ」そのものを絵にしている。 -->
+  <rect width="512" height="512" rx="96" fill="#12141a"/>
+  <g fill="none" stroke-width="18" stroke-linecap="round">
+    <!-- A側（基準） -->
+    <path stroke="#5aa9e6"
+          d="M64 176 L104 176 L128 116 L152 236 L176 146 L200 206 L224 176 L448 176"/>
+    <!-- B側（ずれている。右へ56px＝これが測る対象） -->
+    <path stroke="#e6a55a"
+          d="M64 336 L160 336 L184 276 L208 396 L232 306 L256 366 L280 336 L448 336"/>
+  </g>
+  <!-- ずれ幅を示す矢印 -->
+  <g stroke="#7d8598" stroke-width="10" stroke-linecap="round">
+    <path d="M128 256 L184 256"/>
+    <path d="M128 256 L144 244 M128 256 L144 268"/>
+    <path d="M184 256 L168 244 M184 256 L168 268"/>
+  </g>
+</svg>
