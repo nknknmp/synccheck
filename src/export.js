@@ -773,3 +773,40 @@ export function buildLineupFCPXML(line, options = {}) {
     `</fcpxml>`,
   ].join('\n');
 }
+
+
+/**
+ * 書き出すファイルの名前を、素材の名前から作る。
+ *
+ * 例: 基準が cam1.mp4 なら → cam1_同期済.fcpxml
+ *
+ * ■ どれを「入力ファイル」とするか
+ *
+ * 放り込んだ素材は何本でもあるので、1つ選ぶ必要がある。
+ * ここでは**基準クリップ**（isBase）の名前を使う。タイムラインの
+ * 起点になっていて、他のクリップはこれに合わせてずらしているので、
+ * 「何に同期させたか」が名前に出るのが一番分かりやすい。
+ *
+ * 基準が見つからなければ先頭（items は startSec 順に並んでいる）を使い、
+ * 素材が1本も無ければ従来どおり日時の名前に落とす。
+ */
+export function outName(line, ext, suffix = '同期済') {
+  const items = line && line.items ? line.items : [];
+  const base = items.find((it) => it.isBase) || items[0];
+
+  if (!base || !base.name) {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `SyncCheck_${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
+         + `_${p(d.getHours())}${p(d.getMinutes())}.${ext}`;
+  }
+
+  // 拡張子を落とす（cam1.mp4 → cam1）。名前に点が無ければそのまま。
+  const stem = base.name.replace(/\.[^.\/]+$/, '') || base.name;
+
+  // ファイル名に使えない文字を消す。素材名がそのまま入るので、
+  // Windows で使えない文字（\ / : * ? " < > |）が混ざると保存に失敗する。
+  const safe = stem.replace(/[\/:*?"<>|]/g, '_').trim() || 'SyncCheck';
+
+  return `${safe}_${suffix}.${ext}`;
+}

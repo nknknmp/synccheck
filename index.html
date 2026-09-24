@@ -293,7 +293,7 @@
 <script type="module">
 import { lineUp } from './src/lineup.js';
 import { readDurationQuick, readMeta, loadFFmpeg, setLogging } from './src/audio.js';
-import { buildLineupText, buildLineupCSV, buildLineupFCPXML, saveText,
+import { buildLineupText, buildLineupCSV, buildLineupFCPXML, saveText, outName,
          fmtClock, toFrames, framesToTimecode } from './src/export.js';
 
 // 放り込んだ動画（A側/B側の区別は持たない）
@@ -593,22 +593,15 @@ function showLineup(line) {
 
 // --- 書き出し -------------------------------------------------------------
 
-function stamp() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}`
-       + `_${p(d.getHours())}${p(d.getMinutes())}`;
-}
-
 $('expTxt').onclick = () => {
   if (!lastLine) return;
-  saveText(`SyncCheck_${stamp()}.txt`,
+  saveText(outName(lastLine, 'txt'),
     buildLineupText(lastLine, Number($('fps').value)), 'text/plain');
 };
 
 $('expCsv').onclick = () => {
   if (!lastLine) return;
-  saveText(`SyncCheck_${stamp()}.csv`,
+  saveText(outName(lastLine, 'csv'),
     buildLineupCSV(lastLine, Number($('fps').value)), 'text/csv');
 };
 
@@ -634,7 +627,7 @@ $('expFcp').onclick = () => {
   if (!lastLine) return;
   try {
     const xml = buildLineupFCPXML(lastLine, { fps: Number($('fps').value) });
-    saveText(`SyncCheck_${stamp()}.fcpxml`, xml, 'application/xml');
+    saveText(outName(lastLine, 'fcpxml'), xml, 'application/xml');
   } catch (err) {
     alert('書き出せませんでした: ' + err.message);
   }
