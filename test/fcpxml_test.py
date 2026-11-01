@@ -192,7 +192,7 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
             inner.append(
                 f'                    <asset-clip lane="1" ref="{asset_id(b)}"'
                 f' name="{xml_escape(b["name"])}"'
-                f' offset="{T(b_place_at)}"'
+                f' offset="{to_time(s_a["tcSec"] + (b_place_at - cursor), s_a["fd"], s_a["tb"])}"'
                 f' start="{to_time(s_b["tcSec"] + b_offset_into_source, s_b["fd"], s_b["tb"])}"'
                 f' duration="{to_time(b_visible, s_b["fd"], s_b["tb"])}"'
                 f' format="{s_b["id"]}"'
@@ -478,8 +478,21 @@ ok(clips_tc["osmo_720p.mp4"].get("start") == "2490363876/30000s",
    "asset-clip start もタイムコード基点")
 ok(clips_tc["phone_r.mp4"].get("start") == "0/3000s",
    f"スマホ側の start は従来通り素材内位置 (実際 {clips_tc['phone_r.mp4'].get('start')})")
-ok(clips_tc["phone_r.mp4"].get("offset") == "9000/3000s",
-   f"ズレの3秒は offset 側に出る (実際 {clips_tc['phone_r.mp4'].get('offset')})")
+# 重ねるクリップの offset は「親の start（TC）+ 親の中での位置」。
+# 実効位置 = 親 offset(0) + 子 offset − 親 start が、置きたい位置3秒に一致すること
+def parse_frac(t):
+    t = t.rstrip("s")
+    if "/" in t:
+        n, d = t.split("/")
+        return int(n) / int(d)
+    return float(t)
+
+
+child_off = parse_frac(clips_tc["phone_r.mp4"].get("offset"))
+parent_start = parse_frac(clips_tc["osmo_720p.mp4"].get("start"))
+effective = 0 + child_off - parent_start
+ok(abs(effective - 3.0) < 0.034,
+   f"子の実効位置が3秒に一致 (offset {clips_tc['phone_r.mp4'].get('offset')} → 実効 {effective:.3f}秒)")
 
 print("\n────────────────────────────")
 print(f" 通った: {PASS} / 失敗: {FAIL}")

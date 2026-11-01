@@ -270,10 +270,20 @@ export function verifySync(envA, envB, envRate, windows = 5, maxLagSec = 30,
  * 総当たりは重すぎるので、粗く間引いて全域を探し、
  * 見つかった位置の周辺だけを細かく見直す二段構えにする。
  *
+ * ■ 候補は1つに絞らない（2026-11-02）
+ *
+ * 繰り返し音（一定間隔の作業音など）がある素材では、周期のぶんずれた
+ * 位置にも同じくらい高い山ができる。最良の1つだけを検算すると、
+ * ずれた山でも「窓の残差 0」で通ってしまい、数秒ずれたまま確定した
+ * （実技3 のペアで約2秒のずれ）。そこで離れた山を候補として複数返し、
+ * 呼び出し側で候補ごとに検算して選び直せるようにする。
+ * candidates はスコア順で、offsetSec / score を持つ。
+ * 先頭は従来どおりの最良候補（戻り値の offsetSec と同じ）。
+ *
  * @returns offsetSec は「a の何秒目に b の先頭が来るか」
  */
 export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
-  const empty = { offsetSec: 0, score: 0, confident: false, margin: 0 };
+  const empty = { offsetSec: 0, score: 0, confident: false, margin: 0, candidates: [] };
   if (!envA || !envB || envA.length === 0 || envB.length === 0) return empty;
 
   const factor = Math.max(1, Math.round(envRate / coarseHz));
@@ -289,11 +299,12 @@ export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
   const na = normalize(a);
   const nb = normalize(b);
 
-  let bestLag = 0;
+  const lagMin = -(b.length - 1);
+  const scores = new Float64Array(a.length - lagMin).fill(-Infinity);
   let bestScore = -Infinity;
   let second = -Infinity;
 
-  for (let lag = -(b.length - 1); lag <= a.length - 1; lag++) {
+  for (let lag = lagMin; lag <= a.length - 1; lag++) {
     const start = Math.max(0, lag);
     const end = Math.min(a.length, lag + b.length);
     const count = end - start;
@@ -302,11 +313,11 @@ export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
     let sum = 0;
     for (let i = start; i < end; i++) sum += na[i] * nb[i - lag];
     const score = sum / count;
+    scores[lag - lagMin] = score;
 
     if (score > bestScore) {
       second = bestScore;
       bestScore = score;
-      bestLag = lag;
     } else if (score > second) {
       second = score;
     }
@@ -315,25 +326,42 @@ export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
   if (bestScore === -Infinity) return empty;
 
   // 細探索: 粗い答えの周りだけ、元の解像度で見直す
-  const coarseSec = bestLag / rate;
-  const shift = Math.round(coarseSec * envRate);
-  const span = Math.max(1, Math.round((factor / envRate) * 2 * envRate));
+  const refine = (coarseLag, coarseScore) => {
+    const coarseSec = coarseLag / rate;
+    const shift = Math.round(coarseSec * envRate);
+    const span = Math.max(1, Math.round((factor / envRate) * 2 * envRate));
 
-  let fineBest = { offsetSec: coarseSec, score: bestScore };
-  for (let d = -span; d <= span; d++) {
-    const lag = shift + d;
-    const start = Math.max(0, lag);
-    const end = Math.min(envA.length, lag + envB.length);
-    const count = end - start;
-    if (count < envRate) continue;
+    let fineBest = { offsetSec: coarseSec, score: coarseScore };
+    for (let d = -span; d <= span; d++) {
+      const lag = shift + d;
+      const start = Math.max(0, lag);
+      const end = Math.min(envA.length, lag + envB.length);
+      const count = end - start;
+      if (count < envRate) continue;
 
-    const sa = normalize(envA.subarray(start, end));
-    const sb = normalize(envB.subarray(start - lag, end - lag));
-    let sum = 0;
-    for (let i = 0; i < count; i++) sum += sa[i] * sb[i];
-    const score = sum / count;
-    if (score > fineBest.score) fineBest = { offsetSec: lag / envRate, score };
+      const sa = normalize(envA.subarray(start, end));
+      const sb = normalize(envB.subarray(start - lag, end - lag));
+      let sum = 0;
+      for (let i = 0; i < count; i++) sum += sa[i] * sb[i];
+      const score = sum / count;
+      if (score > fineBest.score) fineBest = { offsetSec: lag / envRate, score };
+    }
+    return fineBest;
+  };
+
+  // 離れた山を候補として拾う（1.5秒以上離れたもの同士を別候補とする）
+  const sep = Math.max(1, Math.round(1.5 * rate));
+  const orderIdx = [...scores.keys()]
+    .filter((i) => scores[i] > -Infinity)
+    .sort((x, y) => scores[y] - scores[x]);
+  const picked = [];
+  for (const i of orderIdx) {
+    if (picked.length >= 4) break;
+    if (picked.every((p) => Math.abs(p - i) >= sep)) picked.push(i);
   }
+  const candidates = picked.map((i) => refine(i + lagMin, scores[i]));
+
+  const fineBest = candidates[0];
 
   // 2番目の候補と差が無いなら、どれが正解か決められていない
   const margin = second === -Infinity ? 1 : bestScore - second;
@@ -342,6 +370,7 @@ export function findOffsetFullRange(envA, envB, envRate, coarseHz = 5) {
     score: fineBest.score,
     confident: margin > 0.05 && fineBest.score > 0.2,
     margin,
+    candidates,
   };
 }
 

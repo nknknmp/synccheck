@@ -203,13 +203,40 @@ export async function lineUp(files, onProgress = () => {}, maxLenSec = 180,
       const a = envs[i], b = envs[j];
       if (!a || !b) continue;
 
-      // 全域から候補を探し、その位置で窓ごとに検算する
+      // 全域から候補を探し、候補ごとに窓で検算して選び直す。
+      //
+      // 繰り返し音があると、周期のぶんずれた候補でも検算（残差0）を
+      // 通ってしまう。最良候補しか見ないと、そのまま数秒ずれて
+      // 確定する（2026-11-02 実技3のペアで約2秒）。
+      // 検算を通った候補が複数あれば、窓の一致割合と窓スコアで
+      // 勝るほうを採り、競合したことは注記に残す（黙って決めない）。
       const rough = findOffsetFullRange(a, b, ENV_RATE);
-      const lagFrames = Math.round(rough.offsetSec * ENV_RATE);
-      const v = verifyOverlap(a, b, ENV_RATE, lagFrames);
-      if (!v.confident) continue;
+      const cands = (rough.candidates && rough.candidates.length)
+        ? rough.candidates : [rough];
+      const verified = [];
+      for (const c of cands) {
+        const lagFrames = Math.round(c.offsetSec * ENV_RATE);
+        const v = verifyOverlap(a, b, ENV_RATE, lagFrames);
+        if (!v.confident) continue;
+        verified.push({ offsetSec: c.offsetSec + v.medianSec, v });
+      }
+      if (verified.length === 0) continue;
+      verified.sort((x, y) =>
+        (y.v.agree / Math.max(1, y.v.windows)
+          - x.v.agree / Math.max(1, x.v.windows))
+        || (y.v.meanScore - x.v.meanScore));
+      const chosen = verified[0];
+      const v = chosen.v;
 
-      const offsetSec = rough.offsetSec + v.medianSec;
+      const offsetSec = chosen.offsetSec;
+      if (verified.length > 1) {
+        notes.push(
+          `${order[i].f.name} と ${order[j].f.name} は`
+          + `置き場所の候補が ${verified.length}つ ありました`
+          + `（${verified.map((e) => e.offsetSec.toFixed(2)).join('秒 / ')}秒）。`
+          + `検算の一致が一番良い候補を採りましたが、`
+          + `繰り返し音でずれることがあるので編集時に確認してください`);
+      }
 
       // 重なりは**実際に手元にある波形の長さ**で測る。
       //

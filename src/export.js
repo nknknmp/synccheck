@@ -429,6 +429,17 @@ export function timecodeToSeconds(tc, fps) {
  * asset-clip の start は「tcSec + 素材内の位置」で書く
  * （timecodeToSeconds のコメント参照）。無ければ 0。
  *
+ * ■ 重ねるクリップ（lane）の offset の書き方
+ *
+ * 親クリップの中に書くクリップの offset は、タイムラインの絶対位置
+ * ではなく「親の start + 親の中での位置」。Resolve の書き出しでも
+ * 子の offset は親のタイムコード基点になっている（実例: 親の start
+ * 416887471/6000s に対し、子は 416897971/6000s ＝ 親TC + 1.75秒）。
+ * 絶対位置で書くと、親にタイムコードがある場合に
+ * 「位置 = 親の offset + (子の offset − 親の start)」が大きく崩れて
+ * クリップが置けなくなる。親の start が 0 の素材同士では
+ * 従来の書き方と一致するので、TC 付き素材が混ざるときだけ効く。
+ *
  * @param {Array<{fps?:number, width?:number, height?:number}>} files
  * @param {{fd:number, tb:number, name:string, width:number, height:number}} seq
  * @param {number} firstId 追加 format に振る最初の番号（r1 と asset と重ねない）
@@ -565,7 +576,10 @@ export function buildFCPXML(results, options = {}) {
     const inner = bVisibleDur > 0 ? [
       `                    <asset-clip lane="1" ref="${assetId(b)}"`
       + ` name="${xmlEscape(b.name)}"`
-      + ` offset="${T(bPlaceAt)}"`
+      // 重ねるクリップの offset は「親の start（タイムコード）+
+      // 親の中での位置」で書く。タイムラインの絶対位置ではない
+      // （planAssetFormats のコメント参照）。
+      + ` offset="${toTime(sA.tcSec + (bPlaceAt - cursor), sA.fd, sA.tb)}"`
       + ` start="${toTime(sB.tcSec + bOffsetIntoSource, sB.fd, sB.tb)}"`
       + ` duration="${toTime(bVisibleDur, sB.fd, sB.tb)}"`
       + ` format="${sB.id}"`
@@ -792,13 +806,26 @@ export function buildLineupFCPXML(line, options = {}) {
   const laneEnd = [];             // 各レーンが空く時刻（秒）
   const laneOf = new Map();       // クリップ名 → レーン番号
 
+  // ■ 1フレーム以内の食い込みは「空いた」とみなす
+  //
+  // 場面の切れ目では、前のクリップの終わりと次のクリップの始まりが
+  // 1フレーム未満だけ重なることがある（長さの丸めの残り）。
+  // そのわずかな重なりでレーンが埋まった扱いになると、次の場面の
+  // 本体が上のレーンに回り、その相方が下に来て、ペアの上下が
+  // 逆転する（2026-11-02 実技3のペアで発生）。
+  // 1フレーム以内なら開始をレーンが空く位置に寄せて下のレーンに入れる。
+  // 場面どうしは音で同期していないので、1フレーム未満の寄せは無害。
+  const frameTol = 1 / nf;
+  const effStart = new Map();     // クリップ → 寄せた後の開始（秒）
   for (const it of sorted) {
-    const end = it.startSec + (it.duration || 0);
-    let lane = laneEnd.findIndex((e) => it.startSec >= e - 1e-6);
+    let lane = laneEnd.findIndex((e) => it.startSec >= e - frameTol);
     if (lane === -1) { lane = laneEnd.length; laneEnd.push(0); }
-    laneEnd[lane] = end;
+    // 許容の範囲内で食い込んでいたら、レーンが空く位置まで寄せる
+    effStart.set(it, Math.max(it.startSec, laneEnd[lane]));
+    laneEnd[lane] = effStart.get(it) + (it.duration || 0);
     laneOf.set(it, lane);
   }
+  const startOf = (it) => effStart.get(it);
 
   // ■ asset を作る
   const assets = new Map();
@@ -843,28 +870,31 @@ export function buildLineupFCPXML(line, options = {}) {
   const body = [];
   for (const host of lane0) {
     const hostDur = host.duration || 0;
-    const hostEnd = host.startSec + hostDur;
+    const hostEnd = startOf(host) + hostDur;
 
     const kids = others.filter((o) => {
       if (used.has(o)) return false;
-      const oEnd = o.startSec + (o.duration || 0);
-      return oEnd > host.startSec + 1e-6 && o.startSec < hostEnd - 1e-6;
+      const oEnd = startOf(o) + (o.duration || 0);
+      return oEnd > startOf(host) + 1e-6 && startOf(o) < hostEnd - 1e-6;
     });
 
     const inner = kids.map((o) => {
       used.add(o);
       // 親より前には置けないので、はみ出す分は頭を削る
-      const cut = Math.max(0, host.startSec - o.startSec);
-      const placeAt = Math.max(host.startSec, o.startSec);
+      const cut = Math.max(0, startOf(host) - startOf(o));
+      const placeAt = Math.max(startOf(host), startOf(o));
       const visible = (o.duration || 0) - cut;
       if (visible <= 0) return null;
       // start / duration は素材側の時間なので、その素材の刻みで書く。
       // start は「素材のタイムコード + 素材内の位置」。
-      // offset はタイムライン側の位置なので sequence の刻みのまま。
+      // offset は「親の start（タイムコード）+ 親の中での位置」で、
+      // 親の刻みで書く（タイムラインの絶対位置ではない）。
       const sO = specByName(o.name);
+      const sHost = specByName(host.name);
       return `                    <asset-clip lane="${laneOf.get(o)}"`
         + ` ref="${assetId(o.name)}" name="${xmlEscape(o.name)}"`
-        + ` offset="${T(placeAt)}" start="${toTime(sO.tcSec + cut, sO.fd, sO.tb)}"`
+        + ` offset="${toTime(sHost.tcSec + (placeAt - startOf(host)), sHost.fd, sHost.tb)}"`
+        + ` start="${toTime(sO.tcSec + cut, sO.fd, sO.tb)}"`
         + ` duration="${toTime(visible, sO.fd, sO.tb)}"`
         + ` format="${sO.id}" audioRole="dialogue"/>`;
     }).filter(Boolean);
@@ -872,7 +902,7 @@ export function buildLineupFCPXML(line, options = {}) {
     const sH = specByName(host.name);
     body.push(
       `                <asset-clip ref="${assetId(host.name)}"`
-      + ` name="${xmlEscape(host.name)}" offset="${T(host.startSec)}"`
+      + ` name="${xmlEscape(host.name)}" offset="${T(startOf(host))}"`
       + ` start="${sH.tcSec ? toTime(sH.tcSec, sH.fd, sH.tb) : '0s'}"`
       + ` duration="${toTime(hostDur, sH.fd, sH.tb)}"`
       + ` format="${sH.id}" audioRole="dialogue">`,
@@ -904,7 +934,7 @@ export function buildLineupFCPXML(line, options = {}) {
     + `        </asset>`;
   });
 
-  const totalDur = Math.max(...sorted.map((it) => it.startSec + (it.duration || 0)));
+  const totalDur = Math.max(...sorted.map((it) => startOf(it) + (it.duration || 0)));
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,

@@ -35,22 +35,27 @@ def ok(cond, label, extra=''):
         print('  FAIL %s%s' % (label, (' ' + extra) if extra else ''))
 
 
-def assign_lanes(items):
-    """src/export.js と同じ: 空いているレーンへ入れる"""
+def assign_lanes(items, fps=30):
+    """src/export.js と同じ: 空いているレーンへ入れる。
+
+    1フレーム以内の食い込みは「空いた」とみなし、開始をレーンが
+    空く位置に寄せる（場面の切れ目でペアの上下が逆転するのを防ぐ）。
+    """
+    tol = 1 / fps
     sorted_items = sorted(items, key=lambda x: x['startSec'])
     lane_end = []
     lane_of = {}
     for it in sorted_items:
-        end = it['startSec'] + it['duration']
         lane = -1
         for i, e in enumerate(lane_end):
-            if it['startSec'] >= e - 1e-6:
+            if it['startSec'] >= e - tol:
                 lane = i
                 break
         if lane == -1:
             lane = len(lane_end)
             lane_end.append(0)
-        lane_end[lane] = end
+        start = max(it['startSec'], lane_end[lane])
+        lane_end[lane] = start + it['duration']
         lane_of[it['name']] = lane
     return lane_of, len(lane_end)
 
@@ -120,6 +125,22 @@ lane_of5, n5 = assign_lanes(items5)
 print('  a: 0 〜 %.3f秒 / b: %.3f秒 〜' % (847.445, 25423 / 30))
 # b の開始が a の終わりより手前なので、ここは重なる扱いでよい
 ok(n5 in (1, 2), 'レーン数は1か2（端数しだい）', '(実際 %d)' % n5)
+
+print()
+print('=== 場面の切れ目でペアが逆転しない（実技3のケース）===')
+# 本体の終わりより 0.0017秒だけ早く次の場面の本体が始まる。
+# 1フレーム未満の食い込みでレーンが埋まった扱いになると、
+# 次の本体が上のレーンに回り、相方が下に来て上下が逆転する。
+items6 = [
+    mk('main1.mp4', 0.0, 1336.3684), mk('sub1.mp4', 13.07, 839.33),
+    mk('main2.mp4', 1336.3667, 632.7), mk('sub2.mp4', 1340.4333, 626.13),
+]
+lane_of6, n6 = assign_lanes(items6)
+ok(lane_of6['main1.mp4'] == 0 and lane_of6['main2.mp4'] == 0,
+   '本体は両方ともレーン0', '(%s)' % lane_of6)
+ok(lane_of6['sub1.mp4'] == 1 and lane_of6['sub2.mp4'] == 1,
+   '相方は両方ともレーン1', '(%s)' % lane_of6)
+ok(n6 == 2, '2レーンで収まる', '(実際 %d)' % n6)
 
 print()
 print('━━━ すべて通った ━━━' if failed == 0 else '━━━ 失敗 %d 件 ━━━' % failed)
