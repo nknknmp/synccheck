@@ -201,7 +201,35 @@ export async function readMeta(file) {
       }
     }
 
-    return { duration, creationMs, hasAudio, fps, log: text };
+    // 解像度（fcpxml で素材ごとの format を書くのに使う）
+    //
+    // 同じ行に出る "1280x720" を取る。コーデックのタグ（0x31637663 等）は
+    // 「数字3桁以上 x 数字3桁以上」に当てはまらないので拾わない。
+    let width = null, height = null;
+    if (vLine) {
+      const m = vLine[0].match(/(\d{3,5})x(\d{3,5})/);
+      if (m) {
+        const w = Number(m[1]), h = Number(m[2]);
+        if (w >= 100 && h >= 100) { width = w; height = h; }
+      }
+    }
+
+    // 埋め込みタイムコード（fcpxml で asset の start に書くのに使う）
+    //
+    //   Stream #0:0 ... Video: ...
+    //       timecode        : 23:03:32;06
+    //   Stream #0:2 ... Data: none (tmcd ...)
+    //       timecode        : 23:03:32;06
+    //
+    // DJI のカメラはタイムコード＝撮影時刻を埋め込む。720p に変換しても
+    // 残る。これを asset の start に書かないと Resolve が素材を
+    // 見つけられない（詳しくは src/export.js の timecodeToSeconds）。
+    // ';' はドロップフレーム。最初に出てきたものを取る（全部同じ値）。
+    let timecode = null;
+    const tm = text.match(/timecode\s*:\s*(\d{1,2}:\d{2}:\d{2}[:;]\d{1,2})/);
+    if (tm) timecode = tm[1];
+
+    return { duration, creationMs, hasAudio, fps, width, height, timecode, log: text };
   } finally {
     ff.off('log', collect);
     await mounted.cleanup();

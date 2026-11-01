@@ -70,6 +70,65 @@ def xml_escape(s):
             .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
+def timecode_to_seconds(tc, fps):
+    """src/export.js の timecodeToSeconds の写し"""
+    import re
+    m = re.match(r"^(\d+):(\d+):(\d+)([:;])(\d+)$", str(tc or ""))
+    if not m:
+        return None
+    h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    drop = m.group(4) == ";"
+    ff = int(m.group(5))
+    t = TIMEBASE[nearest_fps(fps or 30)]
+    fd, tb = t["fd"], t["tb"]
+    nominal = round(tb / fd)
+    frames = (h * 3600 + mi * 60 + s) * nominal + ff
+    if drop:
+        total_min = h * 60 + mi
+        per = round(nominal / 15)
+        frames -= per * (total_min - total_min // 10)
+    return frames * fd / tb
+
+
+def plan_asset_formats(files, seq, first_id, color_space=False):
+    """src/export.js の planAssetFormats の写し"""
+    by_key = {}
+    lines = []
+    nxt = first_id
+    specs = []
+    for f in files:
+        fps = f.get("fps")
+        if isinstance(fps, (int, float)) and fps > 0:
+            t = TIMEBASE[nearest_fps(fps)]
+        else:
+            t = {"fd": seq["fd"], "tb": seq["tb"], "name": seq["name"]}
+        w = f.get("width") or seq["width"]
+        h = f.get("height") or seq["height"]
+        tc_sec = 0
+        if f.get("timecode"):
+            v = timecode_to_seconds(f["timecode"], fps)
+            tc_sec = v if v is not None else 0
+        if t["fd"] == seq["fd"] and t["tb"] == seq["tb"] \
+                and w == seq["width"] and h == seq["height"]:
+            specs.append({"id": "r1", "fd": seq["fd"], "tb": seq["tb"],
+                          "tcSec": tc_sec})
+            continue
+        key = f"{w}x{h}@{t['fd']}/{t['tb']}"
+        if key not in by_key:
+            by_key[key] = f"r{nxt}"
+            nxt += 1
+            lines.append(
+                f'        <format id="{by_key[key]}"'
+                f' name="FFVideoFormat{w}x{h}{t["name"]}"'
+                f' frameDuration="{t["fd"]}/{t["tb"]}s" width="{w}" height="{h}"'
+                + (' colorSpace="1-1-1 (Rec. 709)"' if color_space else '')
+                + '/>'
+            )
+        specs.append({"id": by_key[key], "fd": t["fd"], "tb": t["tb"],
+                      "tcSec": tc_sec})
+    return specs, lines
+
+
 def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncCheck"):
     okr = [r for r in results if r["ok"]]
     if not okr:
@@ -87,6 +146,7 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
             assets[f["name"]] = {
                 "id": f"r{len(assets) + 2}",
                 "name": f["name"],
+                "file": f,
                 "duration": f.get("duration", 0),
                 "src": f"./{f['name']}",
             }
@@ -95,6 +155,12 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
     for r in okr:
         asset_id(r["pair"]["a"])
         asset_id(r["pair"]["b"])
+
+    asset_list = list(assets.values())
+    seq = {"fd": fd, "tb": tb, "name": fps_name, "width": width, "height": height}
+    fmt_specs, fmt_lines = plan_asset_formats(
+        [a["file"] for a in asset_list], seq, len(asset_list) + 2, True)
+    spec_of = {a["id"]: fmt_specs[i] for i, a in enumerate(asset_list)}
 
     sorted_r = sorted(okr, key=lambda x: x["pair"]["a"]["startSec"])
 
@@ -118,21 +184,28 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
             "bSourceStart": b_offset_into_source, "bDur": b_visible,
         })
 
+        s_a = spec_of[asset_id(a)]
+        s_b = spec_of[asset_id(b)]
+
         inner = []
         if b_visible > 0:
             inner.append(
                 f'                    <asset-clip lane="1" ref="{asset_id(b)}"'
                 f' name="{xml_escape(b["name"])}"'
                 f' offset="{T(b_place_at)}"'
-                f' start="{T(b_offset_into_source)}"'
-                f' duration="{T(b_visible)}"'
+                f' start="{to_time(s_b["tcSec"] + b_offset_into_source, s_b["fd"], s_b["tb"])}"'
+                f' duration="{to_time(b_visible, s_b["fd"], s_b["tb"])}"'
+                f' format="{s_b["id"]}"'
                 f' audioRole="dialogue"/>'
             )
 
+        a_start = to_time(s_a["tcSec"], s_a["fd"], s_a["tb"]) if s_a["tcSec"] else "0s"
         clips.append(
             f'                <asset-clip ref="{asset_id(a)}"'
             f' name="{xml_escape(a["name"])}"'
-            f' offset="{T(cursor)}" start="0s" duration="{T(a_dur)}"'
+            f' offset="{T(cursor)}" start="{a_start}"'
+            f' duration="{to_time(a_dur, s_a["fd"], s_a["tb"])}"'
+            f' format="{s_a["id"]}"'
             f' audioRole="dialogue">'
         )
         clips.extend(inner)
@@ -141,11 +214,13 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
         cursor += a_dur
 
     asset_lines = []
-    for a in assets.values():
+    for a in asset_list:
+        s = spec_of[a["id"]]
+        a_start = to_time(s["tcSec"], s["fd"], s["tb"]) if s["tcSec"] else "0s"
         asset_lines.append(
             f'        <asset id="{a["id"]}" name="{xml_escape(a["name"])}"'
-            f' start="0s" duration="{T(a["duration"])}"'
-            f' hasVideo="1" hasAudio="1" format="r1"'
+            f' start="{a_start}" duration="{to_time(a["duration"], s["fd"], s["tb"])}"'
+            f' hasVideo="1" hasAudio="1" format="{s["id"]}"'
             f' audioSources="1" audioChannels="2">\n'
             f'            <media-rep kind="original-media" src="{xml_escape(a["src"])}"/>\n'
             f'        </asset>'
@@ -159,6 +234,7 @@ def build_fcpxml(results, fps=30, width=1920, height=1080, project_name="SyncChe
         f'        <format id="r1" name="FFVideoFormat{width}x{height}{fps_name}"'
         f' frameDuration="{fd}/{tb}s" width="{width}" height="{height}"'
         f' colorSpace="1-1-1 (Rec. 709)"/>',
+        *fmt_lines,
         *asset_lines,
         '    </resources>',
         '    <library>',
@@ -326,6 +402,84 @@ try:
     ok(False, "測れた組が0なら例外を出す", "例外が出なかった")
 except ValueError:
     ok(True, "測れた組が0なら例外を出す")
+
+print("\n=== 素材ごとにフレームレートが違う場合（29.97 のカメラ + 30 のスマホ） ===")
+# Resolve が書き出す fcpxml では asset ごとに実素材の format が付く。
+# 全 asset に 30p を付けると 29.97 の素材だけ「見つからない」になった。
+def mkfile_meta(name, start_sec, dur, fps, w, h):
+    d = mkfile(name, start_sec, dur)
+    d.update({"fps": fps, "width": w, "height": h})
+    return d
+
+
+mixed = [mkresult(
+    mkfile_meta("cam_720p.mp4", 0, 1336.37, 29.97, 1280, 720),
+    mkfile_meta("phone_r.mp4", 0, 839.33, 30, 800, 480),
+    13.07, 826.26)]
+xml_mixed, _ = build_fcpxml(mixed)
+rm = ET.fromstring(xml_mixed)
+fmts_m = {f.get("id"): f for f in rm.findall(".//format")}
+assets_m = {a.get("name"): a for a in rm.findall(".//asset")}
+
+cam_fmt = fmts_m[assets_m["cam_720p.mp4"].get("format")]
+ok(cam_fmt.get("frameDuration") == "1001/30000s",
+   f"29.97 の素材は 1001/30000s (実際 {cam_fmt.get('frameDuration')})")
+ok(cam_fmt.get("width") == "1280" and cam_fmt.get("height") == "720",
+   "29.97 の素材は実解像度 1280x720")
+
+phone_fmt = fmts_m[assets_m["phone_r.mp4"].get("format")]
+ok(phone_fmt.get("frameDuration") == "100/3000s",
+   f"30 の素材は 100/3000s (実際 {phone_fmt.get('frameDuration')})")
+ok(phone_fmt.get("width") == "800" and phone_fmt.get("height") == "480",
+   "30 の素材は実解像度 800x480")
+
+all_ids = [e.get("id") for e in rm.findall(".//format")] \
+    + [e.get("id") for e in rm.findall(".//asset")]
+ok(len(all_ids) == len(set(all_ids)), f"format と asset の id が重複していない ({all_ids})")
+
+# asset-clip 側にも素材の format が付き、duration が素材の分母で書かれる
+clips_m = {c.get("name"): c for c in rm.findall(".//asset-clip")}
+ok(clips_m["cam_720p.mp4"].get("format") == assets_m["cam_720p.mp4"].get("format"),
+   "asset-clip にも素材の format が付く")
+ok(clips_m["cam_720p.mp4"].get("duration").endswith("/30000s"),
+   f"29.97 クリップの duration は /30000s (実際 {clips_m['cam_720p.mp4'].get('duration')})")
+ok(clips_m["phone_r.mp4"].get("duration").endswith("/3000s"),
+   f"30 クリップの duration は /3000s (実際 {clips_m['phone_r.mp4'].get('duration')})")
+
+print("\n=== タイムコード埋め込み素材（Osmo Pocket 等） ===")
+# DJI のカメラはタイムコード＝撮影時刻を埋め込む。asset の start に
+# そのタイムコードを書かないと Resolve が素材を見つけられない。
+ok(abs(timecode_to_seconds("23:03:32;06", 29.97) - 83012.1292) < 0.001,
+   f"DF 23:03:32;06 → 83012.1292秒 (実際 {timecode_to_seconds('23:03:32;06', 29.97)})")
+ok(timecode_to_seconds("00:00:10:15", 30) == 10.5, "NDF 00:00:10:15 → 10.5秒")
+ok(abs(timecode_to_seconds("01:00:00;00", 29.97) - 3599.9964) < 0.001,
+   "DF 01:00:00;00 → 3599.9964秒（1時間ちょうどにならない）")
+ok(timecode_to_seconds("不明", 30) is None, "解釈できない文字列は None")
+
+def mkfile_tc(name, start_sec, dur, fps, w, h, tc):
+    d = mkfile_meta(name, start_sec, dur, fps, w, h)
+    d["timecode"] = tc
+    return d
+
+
+tc_results = [mkresult(
+    mkfile_tc("osmo_720p.mp4", 0, 567.73, 29.97, 1280, 720, "23:03:32;06"),
+    mkfile_meta("phone_r.mp4", 0, 500, 30, 800, 480),
+    3.0, 497)]
+xml_tc, _ = build_fcpxml(tc_results)
+rtc = ET.fromstring(xml_tc)
+assets_tc = {a.get("name"): a for a in rtc.findall(".//asset")}
+ok(assets_tc["osmo_720p.mp4"].get("start") == "2490363876/30000s",
+   f"asset start がタイムコード (実際 {assets_tc['osmo_720p.mp4'].get('start')})")
+ok(assets_tc["phone_r.mp4"].get("start") == "0s",
+   "タイムコード無しの素材は start=0s のまま")
+clips_tc = {c.get("name"): c for c in rtc.findall(".//asset-clip")}
+ok(clips_tc["osmo_720p.mp4"].get("start") == "2490363876/30000s",
+   "asset-clip start もタイムコード基点")
+ok(clips_tc["phone_r.mp4"].get("start") == "0/3000s",
+   f"スマホ側の start は従来通り素材内位置 (実際 {clips_tc['phone_r.mp4'].get('start')})")
+ok(clips_tc["phone_r.mp4"].get("offset") == "9000/3000s",
+   f"ズレの3秒は offset 側に出る (実際 {clips_tc['phone_r.mp4'].get('offset')})")
 
 print("\n────────────────────────────")
 print(f" 通った: {PASS} / 失敗: {FAIL}")

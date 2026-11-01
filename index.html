@@ -366,7 +366,8 @@ async function addFiles(files) {
     clips.push({
       name: file.name, file, duration,
       lastModified: file.lastModified,
-      creationMs: null, hasAudio: null, fps: null, probed: false,
+      creationMs: null, hasAudio: null, fps: null, width: null, height: null,
+      timecode: null, probed: false,
     });
     render();
   }
@@ -438,6 +439,9 @@ $('run').onclick = async () => {
           f.creationMs = m.creationMs;
           f.hasAudio = m.hasAudio;
           f.fps = m.fps;
+          f.width = m.width;
+          f.height = m.height;
+          f.timecode = m.timecode;
           if (m.duration > 0) f.duration = m.duration;
         } catch (err) {
           log(`  ${f.name}: 読めませんでした（${err.message}）`);
@@ -448,6 +452,8 @@ $('run').onclick = async () => {
       log(`  ${f.name}: ${f.duration ? fmtClock(f.duration) : '長さ不明'}`
           + `${f.creationMs ? ' / 撮影時刻あり' : ' / 撮影時刻なし'}`
           + `${f.fps ? ' / ' + f.fps + 'fps' : ''}`
+          + `${f.width ? ' / ' + f.width + 'x' + f.height : ''}`
+          + `${f.timecode ? ' / TC ' + f.timecode : ''}`
           + `${f.hasAudio === false ? ' / 音声なし' : ''}`);
     }
     applyDetectedFps();
