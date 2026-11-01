@@ -354,6 +354,118 @@ export function xmlEscape(s) {
 }
 
 /**
+ * タイムコード文字列（"23:03:32;06"）を秒に直す。
+ *
+ * ■ なぜ必要か
+ *
+ * DJI のカメラ（Osmo Pocket 等）はタイムコード＝撮影時刻を素材に
+ * 埋め込む。720p 変換後も timecode メタデータと tmcd トラックに残る。
+ * Resolve は asset の start をそのタイムコードとして扱い、
+ * asset-clip の start もタイムコードの時間軸で書く（実例:
+ * start="416887471/6000s" ＝ 約19.3時間＝撮影時刻のタイムコード）。
+ *
+ * SyncCheck が start="0s" と書くと、Resolve は「0秒の位置にある素材」
+ * を探しに行って見つからない（メディアオフライン）になる。
+ * タイムコードを持たないスマホ素材は start=0 が正しいので読めた、
+ * というのが「新しいカメラの素材だけ読み込めない」の正体。
+ *
+ * ■ 変換のしかた
+ *
+ * 区切りが ';' ならドロップフレーム。フレーム番号は「時:分:秒」で
+ * 数えた名目フレーム数から、落ちるフレーム数（30系なら1分あたり2、
+ * 10分ごとは落とさない）を引いて実フレーム数に直す。
+ * 秒への換算はその素材の timebase（fd/tb）で行う。
+ *
+ * @param {string} tc "HH:MM:SS:FF" または "HH:MM:SS;FF"
+ * @param {number} fps 素材の実測フレームレート
+ * @returns {number|null} 秒。解釈できなければ null
+ */
+export function timecodeToSeconds(tc, fps) {
+  const m = String(tc || '').match(/^(\d+):(\d+):(\d+)([:;])(\d+)$/);
+  if (!m) return null;
+  const h = Number(m[1]), mi = Number(m[2]), s = Number(m[3]);
+  const drop = m[4] === ';';
+  const ff = Number(m[5]);
+  const { fd, tb } = timebaseFor(nearestFps(fps || 30));
+  const nominal = Math.round(tb / fd);        // 29.97 なら 30
+  let frames = (h * 3600 + mi * 60 + s) * nominal + ff;
+  if (drop) {
+    const totalMin = h * 60 + mi;
+    const per = Math.round(nominal / 15);     // 30系→2、60系→4
+    frames -= per * (totalMin - Math.floor(totalMin / 10));
+  }
+  return (frames * fd) / tb;
+}
+
+/**
+ * 素材ごとの format を決める。
+ *
+ * ■ なぜ素材ごとに format が要るか
+ *
+ * Resolve が書き出す fcpxml では、asset ごとにその素材そのものの
+ * format（解像度とフレームレート）が付く。実例（Resolve の書き出し）:
+ *
+ *   _720p.mp4（1280x720 / 29.97fps）→ frameDuration="1001/30000s"
+ *   r.mp4    （800x480  / 30fps）   → frameDuration="1/30s"
+ *
+ * 以前は全 asset にタイムラインの format（既定 1920x1080 / 30p）を
+ * 付けていた。30fps の素材は偶然レートが一致するので Resolve に
+ * 読み込めたが、29.97fps の素材は「宣言は 30p・実物は 29.97」の
+ * 矛盾になり、クリップが見つからない（メディアオフライン）になった。
+ * 新しいカメラの素材だけ読み込めなかったのはこれ。
+ *
+ * ■ 決め方
+ *
+ * - 素材の実測（fps / width / height）が sequence と同じなら r1 を使う
+ * - 実測が違う素材同士でも、値が同じなら format を共有する
+ * - 実測が無い素材は今まで通り r1（タイムラインの format）
+ *
+ * 返り値の specs は files と同じ並びで、各素材の {id, fd, tb, tcSec}。
+ * asset の duration と、asset-clip の start / duration は
+ * その素材の fd / tb で書く（offset はタイムライン側なので sequence の刻み）。
+ * Resolve の書き出しでも start / duration の分母は素材ごとに違う。
+ *
+ * tcSec は素材に埋め込まれたタイムコードの秒。asset の start に書き、
+ * asset-clip の start は「tcSec + 素材内の位置」で書く
+ * （timecodeToSeconds のコメント参照）。無ければ 0。
+ *
+ * @param {Array<{fps?:number, width?:number, height?:number}>} files
+ * @param {{fd:number, tb:number, name:string, width:number, height:number}} seq
+ * @param {number} firstId 追加 format に振る最初の番号（r1 と asset と重ねない）
+ * @param {boolean} colorSpace format に colorSpace を付けるか
+ */
+export function planAssetFormats(files, seq, firstId, colorSpace = false) {
+  const byKey = new Map();
+  const lines = [];
+  let next = firstId;
+  const specs = files.map((f) => {
+    const hasFps = typeof f.fps === 'number' && f.fps > 0;
+    const t = hasFps
+      ? timebaseFor(nearestFps(f.fps))
+      : { fd: seq.fd, tb: seq.tb, name: seq.name };
+    const w = f.width || seq.width;
+    const h = f.height || seq.height;
+    const tcSec = f.timecode ? (timecodeToSeconds(f.timecode, f.fps) ?? 0) : 0;
+    if (t.fd === seq.fd && t.tb === seq.tb && w === seq.width && h === seq.height) {
+      return { id: 'r1', fd: seq.fd, tb: seq.tb, tcSec };
+    }
+    const key = `${w}x${h}@${t.fd}/${t.tb}`;
+    if (!byKey.has(key)) {
+      const id = `r${next++}`;
+      byKey.set(key, id);
+      lines.push(
+        `        <format id="${id}" name="FFVideoFormat${w}x${h}${t.name}"`
+        + ` frameDuration="${t.fd}/${t.tb}s" width="${w}" height="${h}"`
+        + (colorSpace ? ` colorSpace="1-1-1 (Rec. 709)"` : '')
+        + `/>`
+      );
+    }
+    return { id: byKey.get(key), fd: t.fd, tb: t.tb, tcSec };
+  });
+  return { specs, lines };
+}
+
+/**
  * 測定結果を fcpxml にする。
  *
  * ■ 何が入るか
@@ -397,6 +509,7 @@ export function buildFCPXML(results, options = {}) {
       assets.set(f.name, {
         id: `r${assets.size + 2}`,   // r1 は format に使う
         name: f.name,
+        file: f,   // 素材ごとの format を決めるのに実測（fps / 解像度）が要る
         duration: f.duration || 0,
         // ブラウザはファイルの絶対パスを知らないので、名前だけ書く。
         // 編集ソフト側で「見つからない」と言われたら、素材を指定し直すこと。
@@ -411,6 +524,17 @@ export function buildFCPXML(results, options = {}) {
 
   // 先に全部の id を確定させる
   for (const r of ok) { assetId(r.pair.a); assetId(r.pair.b); }
+
+  // 素材ごとの format（解像度・フレームレート）を決める。
+  // 追加 format の id は asset の後ろから振る（r1 は sequence の format）。
+  const assetList = [...assets.values()];
+  const { specs: fmtSpecs, lines: fmtLines } = planAssetFormats(
+    assetList.map((a) => a.file),
+    { fd, tb, name: fpsName, width, height },
+    assetList.length + 2,
+    true
+  );
+  const specOf = new Map(assetList.map((a, i) => [a.id, fmtSpecs[i]]));
 
   // タイムライン上の置き場所を決める。
   // 組を時間順に並べ、A側の開始が早いものから詰めていく。
@@ -433,12 +557,18 @@ export function buildFCPXML(results, options = {}) {
     const bPlaceAt = Math.max(cursor, bStart);
     const bVisibleDur = bDur - bOffsetIntoSource;
 
+    // start / duration は素材側の時間なので、その素材の刻みで書く。
+    // offset はタイムライン側の位置なので sequence の刻みのまま。
+    const sA = specOf.get(assetId(a));
+    const sB = specOf.get(assetId(b));
+
     const inner = bVisibleDur > 0 ? [
       `                    <asset-clip lane="1" ref="${assetId(b)}"`
       + ` name="${xmlEscape(b.name)}"`
       + ` offset="${T(bPlaceAt)}"`
-      + ` start="${T(bOffsetIntoSource)}"`
-      + ` duration="${T(bVisibleDur)}"`
+      + ` start="${toTime(sB.tcSec + bOffsetIntoSource, sB.fd, sB.tb)}"`
+      + ` duration="${toTime(bVisibleDur, sB.fd, sB.tb)}"`
+      + ` format="${sB.id}"`
       + ` audioRole="dialogue"/>`,
     ] : [];
 
@@ -446,8 +576,9 @@ export function buildFCPXML(results, options = {}) {
       `                <asset-clip ref="${assetId(a)}"`
       + ` name="${xmlEscape(a.name)}"`
       + ` offset="${T(cursor)}"`
-      + ` start="0s"`
-      + ` duration="${T(aDur)}"`
+      + ` start="${sA.tcSec ? toTime(sA.tcSec, sA.fd, sA.tb) : '0s'}"`
+      + ` duration="${toTime(aDur, sA.fd, sA.tb)}"`
+      + ` format="${sA.id}"`
       + ` audioRole="dialogue">`,
       ...inner,
       `                </asset-clip>`
@@ -456,14 +587,16 @@ export function buildFCPXML(results, options = {}) {
     cursor += aDur;
   }
 
-  const assetLines = [...assets.values()].map((a) =>
-    `        <asset id="${a.id}" name="${xmlEscape(a.name)}"`
-    + ` start="0s" duration="${T(a.duration)}"`
-    + ` hasVideo="1" hasAudio="1" format="r1"`
+  const assetLines = assetList.map((a) => {
+    const s = specOf.get(a.id);
+    return `        <asset id="${a.id}" name="${xmlEscape(a.name)}"`
+    + ` start="${s.tcSec ? toTime(s.tcSec, s.fd, s.tb) : '0s'}"`
+    + ` duration="${toTime(a.duration, s.fd, s.tb)}"`
+    + ` hasVideo="1" hasAudio="1" format="${s.id}"`
     + ` audioSources="1" audioChannels="2">\n`
     + `            <media-rep kind="original-media" src="${xmlEscape(a.src)}"/>\n`
-    + `        </asset>`
-  );
+    + `        </asset>`;
+  });
 
   return [
     `<?xml version="1.0" encoding="UTF-8"?>`,
@@ -481,6 +614,7 @@ export function buildFCPXML(results, options = {}) {
     `        <format id="r1" name="FFVideoFormat${width}x${height}${fpsName}"`
     + ` frameDuration="${fd}/${tb}s" width="${width}" height="${height}"`
     + ` colorSpace="1-1-1 (Rec. 709)"/>`,
+    ...fmtLines,
     ...assetLines,
     `    </resources>`,
     `    <library>`,
@@ -673,6 +807,7 @@ export function buildLineupFCPXML(line, options = {}) {
     assets.set(it.name, {
       id: `r${assets.size + 2}`,         // r1 は format
       name: it.name,
+      item: it,   // 素材ごとの format を決めるのに実測（fps / 解像度）が要る
       duration: it.duration || 0,
       // ブラウザは絶対パスを知らないので名前だけ書く。
       // 編集ソフトで「見つからない」と言われたら素材を指定し直す。
@@ -680,6 +815,18 @@ export function buildLineupFCPXML(line, options = {}) {
     });
   }
   const assetId = (name) => assets.get(name).id;
+
+  // 素材ごとの format（解像度・フレームレート）を決める。
+  // 追加 format の id は asset の後ろから振る（r1 は sequence の format）。
+  const assetList = [...assets.values()];
+  const { specs: fmtSpecs, lines: fmtLines } = planAssetFormats(
+    assetList.map((a) => a.item),
+    { fd, tb, name: fpsName, width, height },
+    assetList.length + 2,
+    false
+  );
+  const specOf = new Map(assetList.map((a, i) => [a.id, fmtSpecs[i]]));
+  const specByName = (name) => specOf.get(assetId(name));
 
   // ■ 本体を組む
   //
@@ -711,16 +858,24 @@ export function buildLineupFCPXML(line, options = {}) {
       const placeAt = Math.max(host.startSec, o.startSec);
       const visible = (o.duration || 0) - cut;
       if (visible <= 0) return null;
+      // start / duration は素材側の時間なので、その素材の刻みで書く。
+      // start は「素材のタイムコード + 素材内の位置」。
+      // offset はタイムライン側の位置なので sequence の刻みのまま。
+      const sO = specByName(o.name);
       return `                    <asset-clip lane="${laneOf.get(o)}"`
         + ` ref="${assetId(o.name)}" name="${xmlEscape(o.name)}"`
-        + ` offset="${T(placeAt)}" start="${T(cut)}"`
-        + ` duration="${T(visible)}" audioRole="dialogue"/>`;
+        + ` offset="${T(placeAt)}" start="${toTime(sO.tcSec + cut, sO.fd, sO.tb)}"`
+        + ` duration="${toTime(visible, sO.fd, sO.tb)}"`
+        + ` format="${sO.id}" audioRole="dialogue"/>`;
     }).filter(Boolean);
 
+    const sH = specByName(host.name);
     body.push(
       `                <asset-clip ref="${assetId(host.name)}"`
       + ` name="${xmlEscape(host.name)}" offset="${T(host.startSec)}"`
-      + ` start="0s" duration="${T(hostDur)}" audioRole="dialogue">`,
+      + ` start="${sH.tcSec ? toTime(sH.tcSec, sH.fd, sH.tb) : '0s'}"`
+      + ` duration="${toTime(hostDur, sH.fd, sH.tb)}"`
+      + ` format="${sH.id}" audioRole="dialogue">`,
       ...inner,
       `                </asset-clip>`
     );
@@ -738,14 +893,16 @@ export function buildLineupFCPXML(line, options = {}) {
       + `（${orphan.map((o) => o.name).join('、')}）`);
   }
 
-  const assetLines = [...assets.values()].map((a) =>
-    `        <asset id="${a.id}" name="${xmlEscape(a.name)}"`
-    + ` start="0s" duration="${T(a.duration)}"`
-    + ` hasVideo="1" hasAudio="1" format="r1"`
+  const assetLines = assetList.map((a) => {
+    const s = specOf.get(a.id);
+    return `        <asset id="${a.id}" name="${xmlEscape(a.name)}"`
+    + ` start="${s.tcSec ? toTime(s.tcSec, s.fd, s.tb) : '0s'}"`
+    + ` duration="${toTime(a.duration, s.fd, s.tb)}"`
+    + ` hasVideo="1" hasAudio="1" format="${s.id}"`
     + ` audioSources="1" audioChannels="2">\n`
     + `            <media-rep kind="original-media" src="${xmlEscape(a.src)}"/>\n`
-    + `        </asset>`
-  );
+    + `        </asset>`;
+  });
 
   const totalDur = Math.max(...sorted.map((it) => it.startSec + (it.duration || 0)));
 
@@ -756,6 +913,7 @@ export function buildLineupFCPXML(line, options = {}) {
     `    <resources>`,
     `        <format id="r1" name="${fpsName}"`
     + ` frameDuration="${fd}/${tb}s" width="${width}" height="${height}"/>`,
+    ...fmtLines,
     ...assetLines,
     `    </resources>`,
     `    <library>`,
